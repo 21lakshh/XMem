@@ -1033,7 +1033,18 @@ async def list_pats(user: dict = Depends(_verify_admin_token)):
     if db is None:
         return JSONResponse({"pats": []})
     pats = list(db["outreach_pats"].find().sort("added_at", -1))
+    now = datetime.now(timezone.utc)
     for p in pats:
+        if p.get("reset_at"):
+            reset_dt = p["reset_at"]
+            if reset_dt.tzinfo is None:
+                reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+            if reset_dt <= now and p.get("remaining", 0) <= 0:
+                p["remaining"] = 5000
+                db["outreach_pats"].update_one(
+                    {"_id": p["_id"]}, {"$set": {"remaining": 5000}}
+                )
+
         p["_id"] = str(p["_id"])
         t = p.get("token", "")
         p["token_masked"] = t[:8] + "..." + t[-4:] if len(t) > 12 else "****"
