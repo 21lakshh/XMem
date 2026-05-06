@@ -499,7 +499,7 @@ function switchOutreachTab(tab) {
   if (panel) panel.classList.add('active');
 
   if (tab === 'scraper') loadOutreachJobs();
-  if (tab === 'send') { loadOutreachDraft(); populateJobSelects(); }
+  if (tab === 'send') { loadOutreachDraft(); populateJobSelects(); loadOutreachSenders(); }
   if (tab === 'analytics') populateJobSelects();
 }
 
@@ -508,6 +508,24 @@ async function loadOutreach() {
   loadOutreachJobs();
   loadOutreachDraft();
   populateJobSelects();
+}
+
+async function loadOutreachSenders() {
+  try {
+    const data = await apiFetch('/outreach/senders');
+    const select = document.getElementById('send-sender-select');
+    if (!select) return;
+    if (!data || data.length === 0) {
+      select.innerHTML = '<option value="">No senders configured</option>';
+      return;
+    }
+    select.innerHTML = data.map(s => {
+      const remaining = Math.max(0, s.limit - s.sent_today);
+      return `<option value="${s.email}">${s.email} (${s.sent_today}/${s.limit} used, ${remaining} left)</option>`;
+    }).join('');
+  } catch (e) {
+    console.error("Failed to load senders", e);
+  }
 }
 
 // ── PATs ──────────────────────────────────────────────────────────
@@ -889,11 +907,13 @@ function populateJobSelects() {
 
 async function sendOutreachEmails() {
   const jobId = document.getElementById('send-job-select').value;
+  const senderEmail = document.getElementById('send-sender-select').value;
   const errEl = document.getElementById('send-error');
   const resultEl = document.getElementById('send-result');
   errEl.textContent = '';
   resultEl.style.display = 'none';
 
+  if (!senderEmail) { errEl.textContent = 'Select a sender email first'; return; }
   if (!jobId) { errEl.textContent = 'Select a scraping job first'; return; }
 
   errEl.textContent = 'Fetching unsent emails...';
@@ -928,7 +948,7 @@ async function sendOutreachEmails() {
     const e = unsent[i];
     statusEl.textContent = `Sending ${i+1} of ${unsent.length} (${e.email})...`;
 
-    const data = await apiPost('/outreach/send', { job_id: jobId, email_ids: [e._id] });
+    const data = await apiPost('/outreach/send', { job_id: jobId, email_ids: [e._id], sender_email: senderEmail });
     if (data && data.sent > 0) {
       sentCount++;
     } else {
@@ -938,6 +958,8 @@ async function sendOutreachEmails() {
     const pct = ((i + 1) / unsent.length) * 100;
     fillEl.style.width = pct + '%';
   }
+
+  loadOutreachSenders();
 
   statusEl.textContent = `Finished! Sent ${sentCount} of ${unsent.length} emails. ${errorCount > 0 ? errorCount + ' errors.' : ''}`;
   statusEl.style.color = errorCount > 0 ? 'var(--amber)' : 'var(--green)';

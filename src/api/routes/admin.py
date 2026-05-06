@@ -1617,6 +1617,7 @@ async def get_draft(user: dict = Depends(_verify_admin_token)):
 class SendEmailsRequest(BaseModel):
     job_id: str
     email_ids: Optional[List[str]] = None
+    sender_email: Optional[str] = None
 
 
 def _inject_tracking(html_body: str, email_doc_id: str, server_url: str) -> str:
@@ -1636,13 +1637,8 @@ def _inject_tracking(html_body: str, email_doc_id: str, server_url: str) -> str:
     return tracked_html
 
 
-def _send_single_email(to_email: str, subject: str, html_body: str):
+def _send_single_email(to_email: str, subject: str, html_body: str, sender: str, app_password: str):
     """Send one email via Gmail SMTP."""
-    sender = settings.gmail_sender_email
-    app_password = settings.gmail_app_password
-    if not app_password:
-        raise ValueError("GMAIL_APP_PASSWORD not configured")
-
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
     msg["To"] = to_email
@@ -1660,8 +1656,19 @@ async def send_outreach_emails(req: SendEmailsRequest, user: dict = Depends(_ver
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    if not settings.gmail_app_password:
-        raise HTTPException(status_code=400, detail="GMAIL_APP_PASSWORD not configured in .env")
+    sender_email = req.sender_email or settings.gmail_sender_email
+    app_password = None
+
+    if sender_email == settings.gmail_sender_email:
+        app_password = settings.gmail_app_password
+    else:
+        for k, v in os.environ.items():
+            if k.startswith("OUTREACH_SENDER_") and k.endswith("_EMAIL") and v == sender_email:
+                app_password = os.environ.get(k.replace("_EMAIL", "_PWD"))
+                break
+
+    if not app_password:
+        raise HTTPException(status_code=400, detail=f"No app password configured for sender {sender_email}")
 
     draft = db["outreach_drafts"].find_one({}, sort=[("created_at", -1)])
     if not draft:
@@ -1689,10 +1696,10 @@ async def send_outreach_emails(req: SendEmailsRequest, user: dict = Depends(_ver
         body = _inject_tracking(body, eid, server_url)
 
         try:
-            _send_single_email(to_email, subject, body)
+            _send_single_email(to_email, subject, body, sender_email, app_password)
             db["outreach_emails"].update_one(
                 {"_id": email_doc["_id"]},
-                {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc)}},
+                {"$set": {"sent": True, "sent_at": datetime.now(timezone.utc), "sender_email": sender_email}},
             )
             sent_count += 1
             time.sleep(0.5)
@@ -1706,6 +1713,30 @@ async def send_outreach_emails(req: SendEmailsRequest, user: dict = Depends(_ver
         "errors": errors[:10],
         "total_attempted": len(emails),
     })
+
+@router.get("/api/outreach/senders")
+async def get_outreach_senders(user: dict = Depends(_verify_admin_token)):
+    senders = []
+    if settings.gmail_sender_email and settings.gmail_app_password:
+        senders.append(settings.gmail_sender_email)
+        
+    for k, v in os.environ.items():
+        if k.startswith("OUTREACH_SENDER_") and k.endswith("_EMAIL"):
+            pwd = os.environ.get(k.replace("_EMAIL", "_PWD"))
+            if v and pwd and v not in senders:
+                senders.append(v)
+                
+    db = _get_outreach_db()
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    stats = []
+    for s in senders:
+        count = 0
+        if db is not None:
+            count = db["outreach_emails"].count_documents({"sender_email": s, "sent_at": {"$gte": today}})
+        stats.append({"email": s, "sent_today": count, "limit": 400})
+        
+    return JSONResponse(stats)
 
 
 # ── Tracking Endpoints (public — no auth) ─────────────────────────────────
