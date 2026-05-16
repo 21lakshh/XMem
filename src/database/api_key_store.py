@@ -4,7 +4,10 @@ import hashlib
 import logging
 import secrets
 import string
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
+from threading import RLock
 from typing import List, Optional, Dict, Any
 
 from src.config import settings
@@ -17,6 +20,11 @@ API_KEY_LENGTH = 48  # Total length including prefix
 
 # In-memory fallback
 _in_memory_api_keys: Dict[str, Dict[str, Any]] = {}
+
+VALIDATION_CACHE_TTL_SECONDS = 120
+VALIDATION_CACHE_MAX_SIZE = 2048
+_validation_cache: OrderedDict[str, tuple[float, Dict[str, Any]]] = OrderedDict()
+_validation_cache_lock = RLock()
 
 
 class APIKeyStore:
@@ -99,6 +107,41 @@ class APIKeyStore:
         normalized = sorted({scope.strip() for scope in (scopes or ["*"]) if scope and scope.strip()})
         return normalized or ["*"]
 
+    def _clear_validation_cache(self) -> None:
+        """Clear cached API key validation results."""
+        with _validation_cache_lock:
+            _validation_cache.clear()
+
+    def _get_cached_validation(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        """Return a cached validation result when it is still fresh."""
+        with _validation_cache_lock:
+            cached = _validation_cache.get(key_hash)
+            if not cached:
+                return None
+
+            expires_at, key_doc = cached
+            if expires_at <= time.monotonic():
+                _validation_cache.pop(key_hash, None)
+                return None
+
+            result = dict(key_doc)
+
+        result["last_used"] = self._utc_now()
+        return result
+
+    def _cache_validation(self, key_hash: str, key_doc: Dict[str, Any]) -> None:
+        """Cache a sanitized active API key document."""
+        with _validation_cache_lock:
+            if key_hash in _validation_cache:
+                _validation_cache.pop(key_hash, None)
+            while len(_validation_cache) >= VALIDATION_CACHE_MAX_SIZE:
+                _validation_cache.popitem(last=False)
+
+            _validation_cache[key_hash] = (
+                time.monotonic() + VALIDATION_CACHE_TTL_SECONDS,
+                dict(key_doc),
+            )
+
     def _utc_now(self) -> datetime:
         return datetime.now(timezone.utc)
 
@@ -133,6 +176,7 @@ class APIKeyStore:
 
     def _deactivate_expired_key(self, key_doc: Dict[str, Any]) -> None:
         key_doc["is_active"] = False
+        self._clear_validation_cache()
         if self._in_memory:
             return
         try:
@@ -279,6 +323,17 @@ class APIKeyStore:
                     return result
             return None
 
+        cached_doc = self._get_cached_validation(key_hash)
+        if cached_doc:
+            if self._is_expired(cached_doc):
+                self._clear_validation_cache()
+                return None
+            if not self._scope_allowed(cached_doc, required_scope):
+                return None
+            if not self._binding_allowed(cached_doc, org_id, project_id):
+                return None
+            return cached_doc
+
         try:
             key_doc = self.api_keys.find_one({
                 "key_hash": key_hash,
@@ -297,10 +352,15 @@ class APIKeyStore:
                     {"_id": key_doc["_id"]},
                     {"$set": {"last_used": now}}
                 )
-                key_doc["last_used"] = now
-                key_doc["id"] = str(key_doc.pop("_id"))
+                key_doc = {
+                    **key_doc,
+                    "id": str(key_doc["_id"]),
+                    "last_used": now,
+                }
+                key_doc.pop("_id", None)
                 key_doc.pop("key_hash", None)
-            return key_doc
+                self._cache_validation(key_hash, key_doc)
+            return dict(key_doc) if key_doc else None
         except Exception as e:
             logger.error(f"Database error validating API key: {e}")
             return None
@@ -311,6 +371,7 @@ class APIKeyStore:
             if key_id in _in_memory_api_keys:
                 if _in_memory_api_keys[key_id].get("user_id") == user_id:
                     _in_memory_api_keys[key_id]["is_active"] = False
+                    self._clear_validation_cache()
                     return True
             return False
 
@@ -320,7 +381,10 @@ class APIKeyStore:
                 {"_id": ObjectId(key_id), "user_id": user_id},
                 {"$set": {"is_active": False}}
             )
-            return result.modified_count > 0
+            success = result.modified_count > 0
+            if success:
+                self._clear_validation_cache()
+            return success
         except Exception as e:
             logger.error(f"Failed to revoke API key {key_id}: {e}")
             return False
@@ -336,6 +400,7 @@ class APIKeyStore:
             if key_id in _in_memory_api_keys:
                 if _in_memory_api_keys[key_id].get("user_id") == user_id:
                     _in_memory_api_keys[key_id]["name"] = new_name
+                    self._clear_validation_cache()
                     return True
             return False
 
@@ -345,7 +410,10 @@ class APIKeyStore:
                 {"_id": ObjectId(key_id), "user_id": user_id},
                 {"$set": {"name": new_name}}
             )
-            return result.modified_count > 0
+            success = result.modified_count > 0
+            if success:
+                self._clear_validation_cache()
+            return success
         except Exception as e:
             logger.error(f"Failed to update API key name {key_id}: {e}")
             return False

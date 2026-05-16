@@ -97,6 +97,38 @@ def test_api_key_store_refuses_memory_fallback_in_production(monkeypatch):
         store._enable_in_memory_fallback(ConnectionError("offline"))
 
 
+def test_api_key_validation_cache_keeps_scope_and_binding_filters():
+    store = object.__new__(APIKeyStore)
+    store._connected = True
+    store._in_memory = False
+    store.api_keys = None
+    store._clear_validation_cache()
+
+    key = "xmem_cached"
+    key_hash = store._hash_key(key)
+    store._cache_validation(
+        key_hash,
+        {
+            "id": "key-1",
+            "user_id": "user-1",
+            "scopes": ["memory:read"],
+            "org_id": "org-1",
+            "project_id": "project-1",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "is_active": True,
+        },
+    )
+
+    assert store.validate_api_key(
+        key,
+        required_scope="memory:read",
+        org_id="org-1",
+        project_id="project-1",
+    )
+    assert store.validate_api_key(key, required_scope="admin:write", org_id="org-1", project_id="project-1") is None
+    assert store.validate_api_key(key, required_scope="memory:read") is None
+
+
 def test_user_store_get_or_create_and_username_helpers_in_memory(monkeypatch):
     _in_memory_users.clear()
     monkeypatch.setattr(UserStore, "_try_connect", _force_user_memory)
