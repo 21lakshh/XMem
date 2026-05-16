@@ -20,6 +20,29 @@ PGVECTOR_URL=postgresql://xmem:xmem@localhost:5432/xmem
 PGVECTOR_TABLE=xmem_vectors
 ```
 
+Use the same Postgres instance for app metadata such as users, API keys,
+projects, and team members:
+
+```env
+APP_STORE_PROVIDER=postgres
+APP_POSTGRES_URL=postgresql://xmem:xmem@localhost:5432/xmem
+```
+
+If `APP_POSTGRES_URL` is omitted, XMem uses `PGVECTOR_URL`.
+
+For throwaway local testing without persistence:
+
+```env
+APP_STORE_PROVIDER=memory
+```
+
+Legacy admin analytics endpoints still read the old analytics collection shape.
+For a no-Mongo local setup, disable analytics collection:
+
+```env
+ENABLE_ANALYTICS=false
+```
+
 ```env
 VECTOR_STORE_PROVIDER=chroma
 CHROMA_PERSIST_DIR=.xmem/chroma

@@ -158,6 +158,14 @@ class Settings(BaseSettings):
         default="xmem_vectors",
         description="Postgres table used by the pgvector backend",
     )
+    app_store_provider: str = Field(
+        default="mongo",
+        description="App metadata store: mongo, postgres, or memory",
+    )
+    app_postgres_url: Optional[str] = Field(
+        default=None,
+        description="Postgres URL for app metadata. Defaults to PGVECTOR_URL.",
+    )
     chroma_persist_dir: str = Field(
         default=".xmem/chroma",
         description="Local Chroma persistence directory",
