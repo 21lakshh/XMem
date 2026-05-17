@@ -157,6 +157,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy
     timeout-minutes: 10
+    environment:
+      name: staging
 
     steps:
       - uses: actions/checkout@v4
