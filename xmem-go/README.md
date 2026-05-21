@@ -6,7 +6,9 @@ This project migrates only the main memory product:
 
 - `GET /health`
 - `POST /v1/memory/ingest`
+- `GET /v1/memory/ingest/{job_id}/status`
 - `POST /v1/memory/batch-ingest`
+- `GET /v1/memory/jobs/{job_id}/status`
 - `POST /v1/memory/retrieve`
 - `POST /v1/memory/search`
 
@@ -38,6 +40,9 @@ curl -X POST http://localhost:8081/v1/memory/ingest \
   -H 'Content-Type: application/json' \
   -d '{"user_query":"My name is Alice and I work at XMem.","user_id":"alice"}'
 
+# The ingest response returns a durable job_id immediately. Poll the returned
+# status_url until status is "succeeded" before retrieving the newly written memory.
+
 curl -X POST http://localhost:8081/v1/memory/retrieve \
   -H 'Authorization: Bearer dev-xmem-go-key' \
   -H 'Content-Type: application/json' \
@@ -50,6 +55,7 @@ The server supports real adapters and safe local fallbacks:
 
 - Router: `chi`
 - API key/user store: MongoDB when `APP_STORE_PROVIDER=mongo`, memory fallback outside production
+- Durable job store: MongoDB when `APP_STORE_PROVIDER=mongo`, memory fallback outside production
 - Vector store: Pinecone when `VECTOR_STORE_PROVIDER=pinecone`, memory fallback outside production
 - Temporal graph: Neo4j when `NEO4J_PASSWORD` is set, memory fallback outside production
 - LLMs: OpenAI, OpenRouter, Gemini, Claude, Ollama via direct HTTP clients, with local deterministic fallback

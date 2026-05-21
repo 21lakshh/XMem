@@ -60,6 +60,13 @@ type BatchIngestResponse struct {
 	Results []IngestResponse `json:"results"`
 }
 
+type JobAcceptedResponse struct {
+	JobID     string `json:"job_id"`
+	Status    string `json:"status"`
+	Created   bool   `json:"created"`
+	StatusURL string `json:"status_url"`
+}
+
 type RetrieveRequest struct {
 	Query  string `json:"query"`
 	UserID string `json:"user_id"`

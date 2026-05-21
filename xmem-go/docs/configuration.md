@@ -21,7 +21,7 @@ Scanner, transcript parsing, scrape, and context endpoint configuration is inten
 
 ## Adapter Selection
 
-- Set `APP_STORE_PROVIDER=mongo` to validate `xmem_...` API keys against MongoDB collections `api_keys` and `users`.
+- Set `APP_STORE_PROVIDER=mongo` to validate `xmem_...` API keys against MongoDB collections `api_keys` and `users`, and persist durable ingest jobs in `durable_jobs`.
 - Set `VECTOR_STORE_PROVIDER=pinecone` to write profile/summary/image/snippet vectors to Pinecone.
 - Set `EMBEDDING_PROVIDER=openai` with `OPENAI_API_KEY` to generate OpenAI embeddings. `OPENAI_EMBEDDING_MODEL` defaults to `EMBEDDING_MODEL`.
 - Set `NEO4J_PASSWORD` with `NEO4J_URI` and `NEO4J_USERNAME` to enable the Neo4j temporal store.

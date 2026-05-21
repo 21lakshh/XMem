@@ -11,6 +11,7 @@ type DomainResult = contracts.DomainResult
 type IngestResponse = contracts.IngestResponse
 type BatchIngestRequest = contracts.BatchIngestRequest
 type BatchIngestResponse = contracts.BatchIngestResponse
+type JobAcceptedResponse = contracts.JobAcceptedResponse
 type RetrieveRequest = contracts.RetrieveRequest
 type SourceRecord = contracts.SourceRecord
 type RetrieveResponse = contracts.RetrieveResponse

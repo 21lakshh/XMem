@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xortexai/xmem-go/internal/agents"
 	"github.com/xortexai/xmem-go/internal/config"
@@ -99,6 +100,12 @@ func TestMemoryFlowAndExcludedRoutes(t *testing.T) {
 	if ingestEnvelope.Status != "ok" || ingestEnvelope.Data == nil {
 		t.Fatalf("bad ingest envelope: %#v", ingestEnvelope)
 	}
+	ingestData := ingestEnvelope.Data.(map[string]any)
+	jobID, _ := ingestData["job_id"].(string)
+	if jobID == "" {
+		t.Fatalf("ingest response missing job_id: %#v", ingestData)
+	}
+	waitForJob(t, handler, "/v1/memory/ingest/"+jobID+"/status")
 
 	retrieve := authedJSON(handler, http.MethodPost, "/v1/memory/retrieve", `{"query":"Where do I work and what is upcoming?","user_id":"alice","top_k":5}`)
 	if retrieve.Code != http.StatusOK {
@@ -122,6 +129,16 @@ func TestBatchIngestAndSearch(t *testing.T) {
 	if batch.Code != http.StatusOK {
 		t.Fatalf("batch status=%d body=%s", batch.Code, batch.Body.String())
 	}
+	var batchEnvelope APIResponse
+	if err := json.Unmarshal(batch.Body.Bytes(), &batchEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	batchData := batchEnvelope.Data.(map[string]any)
+	jobID, _ := batchData["job_id"].(string)
+	if jobID == "" {
+		t.Fatalf("batch response missing job_id: %#v", batchData)
+	}
+	waitForJob(t, handler, "/v1/memory/jobs/"+jobID+"/status")
 	search := authedJSON(handler, http.MethodPost, "/v1/memory/search", `{"query":"pizza","user_id":"alice","domains":["profile","summary"],"top_k":10}`)
 	if search.Code != http.StatusOK {
 		t.Fatalf("search status=%d body=%s", search.Code, search.Body.String())
@@ -138,4 +155,31 @@ func authedJSON(handler http.Handler, method, path, body string) *httptest.Respo
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	return resp
+}
+
+func waitForJob(t *testing.T, handler http.Handler, statusPath string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := authedJSON(handler, http.MethodGet, statusPath, ``)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status path=%s code=%d body=%s", statusPath, resp.Code, resp.Body.String())
+		}
+		var envelope APIResponse
+		if err := json.Unmarshal(resp.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		data, ok := envelope.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("status data missing: %#v", envelope.Data)
+		}
+		if data["status"] == "succeeded" {
+			return
+		}
+		if data["status"] == "dead_letter" {
+			t.Fatalf("job dead-lettered: %s", resp.Body.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job did not finish: %s", statusPath)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/xortexai/xmem-go/internal/config"
 	"github.com/xortexai/xmem-go/internal/database"
 	"github.com/xortexai/xmem-go/internal/graph"
+	"github.com/xortexai/xmem-go/internal/jobs"
 	"github.com/xortexai/xmem-go/internal/models"
 	"github.com/xortexai/xmem-go/internal/pipelines"
 	"github.com/xortexai/xmem-go/internal/storage"
@@ -98,6 +99,7 @@ func main() {
 	}
 
 	var keyStore database.APIKeyStore = database.NewMemoryAPIKeyStore()
+	var jobStore jobs.Store = jobs.NewMemoryStore()
 	if settings.AppStoreProvider == "mongo" {
 		if mongoStore, err := database.NewMongoAPIKeyStore(context.Background(), settings); err == nil {
 			keyStore = mongoStore
@@ -108,8 +110,17 @@ func main() {
 		} else {
 			logger.Warn("mongodb unavailable, using memory API key store", "error", err)
 		}
+		if durableStore, err := database.NewMongoDurableJobStore(context.Background(), settings); err == nil {
+			jobStore = durableStore
+			logger.Info("using MongoDB durable job store")
+		} else if settings.Environment == "production" {
+			logger.Error("mongodb durable job initialization failed", "error", err)
+			os.Exit(1)
+		} else {
+			logger.Warn("mongodb durable job store unavailable, using memory job store", "error", err)
+		}
 	}
-	server := api.NewServer(settings, logger, ingest, retrieval, keyStore)
+	server := api.NewServer(settings, logger, ingest, retrieval, keyStore, jobStore)
 	httpServer := &http.Server{
 		Addr:              settings.Addr(),
 		Handler:           server.Handler(),
