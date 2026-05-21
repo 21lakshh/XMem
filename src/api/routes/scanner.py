@@ -40,7 +40,6 @@ from pydantic import BaseModel, Field
 from src.api.dependencies import require_api_key
 from src.config import settings
 from src.jobs.durable import (
-    FAILED,
     QUEUED,
     get_default_job_store,
     new_attempt_id,
@@ -69,7 +68,7 @@ def _get_code_store():
 
 
 def _schedule_durable_job(job: Dict[str, Any], handler) -> None:
-    if job.get("status") in {QUEUED, FAILED}:
+    if job.get("status") == QUEUED:
         asyncio.create_task(run_job(get_default_job_store(), job["job_id"], handler))
 
 

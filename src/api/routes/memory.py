@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -48,7 +49,6 @@ import re
 from playwright.sync_api import sync_playwright
 
 from src.jobs.durable import (
-    FAILED,
     QUEUED,
     get_default_job_store,
     run_job,
@@ -229,7 +229,7 @@ async def _run_scrape_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _schedule_job(job: Dict[str, Any], handler) -> None:
-    if job.get("status") in {QUEUED, FAILED}:
+    if job.get("status") == QUEUED:
         asyncio.create_task(run_job(get_default_job_store(), job["job_id"], handler))
 
 
@@ -269,8 +269,6 @@ async def _render_chat_share(url: str) -> tuple[str, str]:
 # Launching Chromium from cold takes 3-5s. We keep a singleton alive and
 # reuse it across scrape requests. The browser is thread-safe when each
 # request uses its own BrowserContext.
-
-import threading
 
 _browser_lock = threading.Lock()
 _pw_instance = None

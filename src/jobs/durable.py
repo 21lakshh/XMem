@@ -178,9 +178,9 @@ class DurableJobStore:
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self.jobs.find_one({"job_id": job_id})
 
-    def mark_running(self, job_id: str) -> None:
-        self.jobs.update_one(
-            {"job_id": job_id},
+    def claim_for_run(self, job_id: str) -> bool:
+        result = self.jobs.update_one(
+            {"job_id": job_id, "status": QUEUED},
             {
                 "$set": {
                     "status": RUNNING,
@@ -192,6 +192,7 @@ class DurableJobStore:
                 "$inc": {"retry_count": 1},
             },
         )
+        return result.modified_count == 1
 
     def mark_succeeded(
         self,
@@ -264,7 +265,14 @@ async def run_job(
             return
 
         timeout_seconds = float(job.get("timeout_seconds") or 120.0)
-        await asyncio.to_thread(store.mark_running, job_id)
+        claimed = await asyncio.to_thread(store.claim_for_run, job_id)
+        if not claimed:
+            logger.info(
+                "Durable job %s was already claimed; skipping duplicate runner",
+                job_id,
+            )
+            return
+
         started = time.perf_counter()
         try:
             result = await asyncio.wait_for(handler(), timeout=timeout_seconds)

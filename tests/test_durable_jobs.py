@@ -1,4 +1,6 @@
+import asyncio
 import os
+import threading
 
 import pytest
 
@@ -48,15 +50,20 @@ def test_redact_payload_masks_nested_secret_fields():
 class FakeJobStore:
     def __init__(self, job):
         self.job = job
+        self.lock = threading.Lock()
 
     def get(self, job_id):
         assert job_id == self.job["job_id"]
         return dict(self.job)
 
-    def mark_running(self, job_id):
+    def claim_for_run(self, job_id):
         assert job_id == self.job["job_id"]
-        self.job["status"] = RUNNING
-        self.job["retry_count"] = self.job.get("retry_count", 0) + 1
+        with self.lock:
+            if self.job["status"] != QUEUED:
+                return False
+            self.job["status"] = RUNNING
+            self.job["retry_count"] = self.job.get("retry_count", 0) + 1
+            return True
 
     def mark_succeeded(self, job_id, result=None):
         assert job_id == self.job["job_id"]
@@ -128,3 +135,36 @@ async def test_run_job_dead_letters_after_max_attempts():
     assert store.job["status"] == DEAD_LETTER
     assert store.job["retry_count"] == 1
     assert store.job["error"] == "permanent failure"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_runners_only_execute_handler_once():
+    store = FakeJobStore({
+        "job_id": "job-3",
+        "status": QUEUED,
+        "retry_count": 0,
+        "max_attempts": 1,
+        "timeout_seconds": 1,
+    })
+    started = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    async def handler():
+        nonlocal attempts
+        attempts += 1
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    first = asyncio.create_task(run_job(store, "job-3", handler, retry_base_seconds=0))
+    await started.wait()
+    second = asyncio.create_task(run_job(store, "job-3", handler, retry_base_seconds=0))
+
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert attempts == 1
+    assert store.job["status"] == SUCCEEDED
+    assert store.job["retry_count"] == 1
