@@ -14,6 +14,11 @@ import (
 	"github.com/xortexai/xmem-go/internal/config"
 )
 
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type ToolCall struct {
 	ID   string         `json:"id"`
 	Name string         `json:"name"`
@@ -29,6 +34,7 @@ type Response struct {
 type ChatModel interface {
 	Name() string
 	Generate(ctx context.Context, prompt string) (Response, error)
+	GenerateWithMessages(ctx context.Context, messages []Message) (Response, error)
 	SelectTools(ctx context.Context, query string, profileCatalog []map[string]string) (Response, error)
 }
 
@@ -84,6 +90,14 @@ func (m LocalModel) Generate(_ context.Context, prompt string) (Response, error)
 		answer = synthesizeFromPrompt(prompt)
 	}
 	return Response{Content: answer, ModelName: m.name}, nil
+}
+
+func (m LocalModel) GenerateWithMessages(_ context.Context, messages []Message) (Response, error) {
+	combined := ""
+	for _, msg := range messages {
+		combined += msg.Content + "\n"
+	}
+	return Response{Content: strings.TrimSpace(combined), ModelName: m.name}, nil
 }
 
 func (m LocalModel) SelectTools(_ context.Context, query string, catalog []map[string]string) (Response, error) {
@@ -201,6 +215,165 @@ func (m HTTPModel) Generate(ctx context.Context, prompt string) (Response, error
 		return m.local.Generate(ctx, prompt)
 	}
 	return Response{Content: content, ModelName: m.model}, nil
+}
+
+func (m HTTPModel) GenerateWithMessages(ctx context.Context, messages []Message) (Response, error) {
+	content, err := m.completeWithMessages(ctx, messages)
+	if err != nil {
+		combined := ""
+		for _, msg := range messages {
+			combined += strings.ToUpper(msg.Role) + ":\n" + msg.Content + "\n\n"
+		}
+		return m.Generate(ctx, strings.TrimSpace(combined))
+	}
+	return Response{Content: content, ModelName: m.model}, nil
+}
+
+func (m HTTPModel) completeWithMessages(ctx context.Context, messages []Message) (string, error) {
+	switch m.provider {
+	case "openai", "openrouter":
+		return m.completeOpenAIMessages(ctx, messages)
+	case "gemini":
+		return m.completeGeminiMessages(ctx, messages)
+	case "claude":
+		return m.completeClaudeMessages(ctx, messages)
+	case "ollama":
+		return m.completeOllamaMessages(ctx, messages)
+	default:
+		return "", errors.New("unsupported provider")
+	}
+}
+
+func (m HTTPModel) completeOpenAIMessages(ctx context.Context, messages []Message) (string, error) {
+	apiMessages := make([]map[string]string, 0, len(messages))
+	for _, msg := range messages {
+		apiMessages = append(apiMessages, map[string]string{"role": msg.Role, "content": msg.Content})
+	}
+	body := map[string]any{
+		"model":       m.model,
+		"messages":    apiMessages,
+		"temperature": 0.1,
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, m.url, body, &out, func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+		if m.provider == "openrouter" {
+			req.Header.Set("HTTP-Referer", "http://localhost:8081")
+			req.Header.Set("X-Title", "xmem-go")
+		}
+	}); err != nil {
+		return "", err
+	}
+	if len(out.Choices) == 0 {
+		return "", errors.New("empty model response")
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+func (m HTTPModel) completeGeminiMessages(ctx context.Context, messages []Message) (string, error) {
+	var systemText string
+	contents := []map[string]any{}
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			systemText = msg.Content
+			continue
+		}
+		role := "user"
+		if msg.Role == "assistant" || msg.Role == "model" {
+			role = "model"
+		}
+		contents = append(contents, map[string]any{
+			"role":  role,
+			"parts": []map[string]string{{"text": msg.Content}},
+		})
+	}
+	body := map[string]any{
+		"contents":         contents,
+		"generationConfig": map[string]any{"temperature": 0.1},
+	}
+	if systemText != "" {
+		body["system_instruction"] = map[string]any{
+			"parts": []map[string]string{{"text": systemText}},
+		}
+	}
+	var out struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, m.url, body, &out, nil); err != nil {
+		return "", err
+	}
+	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
+		return "", errors.New("empty gemini response")
+	}
+	return out.Candidates[0].Content.Parts[0].Text, nil
+}
+
+func (m HTTPModel) completeClaudeMessages(ctx context.Context, messages []Message) (string, error) {
+	var systemText string
+	apiMessages := []map[string]string{}
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			systemText = msg.Content
+			continue
+		}
+		apiMessages = append(apiMessages, map[string]string{"role": msg.Role, "content": msg.Content})
+	}
+	body := map[string]any{
+		"model":      m.model,
+		"max_tokens": 4096,
+		"messages":   apiMessages,
+	}
+	if systemText != "" {
+		body["system"] = systemText
+	}
+	var out struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, m.url, body, &out, func(req *http.Request) {
+		req.Header.Set("x-api-key", m.apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}); err != nil {
+		return "", err
+	}
+	if len(out.Content) == 0 {
+		return "", errors.New("empty claude response")
+	}
+	return out.Content[0].Text, nil
+}
+
+func (m HTTPModel) completeOllamaMessages(ctx context.Context, messages []Message) (string, error) {
+	apiMessages := make([]map[string]string, 0, len(messages))
+	for _, msg := range messages {
+		apiMessages = append(apiMessages, map[string]string{"role": msg.Role, "content": msg.Content})
+	}
+	body := map[string]any{
+		"model":    m.model,
+		"stream":   false,
+		"messages": apiMessages,
+	}
+	var out struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, m.url, body, &out, nil); err != nil {
+		return "", err
+	}
+	return out.Message.Content, nil
 }
 
 func (m HTTPModel) SelectTools(ctx context.Context, query string, catalog []map[string]string) (Response, error) {

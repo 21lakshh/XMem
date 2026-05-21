@@ -82,13 +82,13 @@ func main() {
 	ingest := &pipelines.IngestPipeline{
 		ModelName:  model.Name(),
 		Weaver:     w,
-		Classifier: agents.ClassifierAgent{},
-		Profiler:   agents.ProfilerAgent{},
-		Temporal:   agents.TemporalAgent{},
-		Summarizer: agents.SummarizerAgent{},
-		Image:      agents.ImageAgent{},
-		Snippet:    agents.SnippetAgent{},
-		Judge:      agents.JudgeAgent{},
+		Classifier: agents.ClassifierAgent{Model: model},
+		Profiler:   agents.ProfilerAgent{Model: model},
+		Temporal:   agents.TemporalAgent{Model: model},
+		Summarizer: agents.SummarizerAgent{Model: model},
+		Image:      agents.ImageAgent{Model: model},
+		Snippet:    agents.SnippetAgent{Model: model},
+		Judge:      agents.JudgeAgent{Model: model},
 	}
 	retrieval := &pipelines.RetrievalPipeline{
 		Model:         model,

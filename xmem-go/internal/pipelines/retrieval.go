@@ -10,6 +10,7 @@ import (
 	"github.com/xortexai/xmem-go/internal/contracts"
 	"github.com/xortexai/xmem-go/internal/graph"
 	"github.com/xortexai/xmem-go/internal/models"
+	"github.com/xortexai/xmem-go/internal/prompts"
 	"github.com/xortexai/xmem-go/internal/storage"
 )
 
@@ -25,10 +26,14 @@ func (p *RetrievalPipeline) Run(ctx context.Context, req contracts.RetrieveReque
 		req.TopK = 5
 	}
 	catalog, profileRecords := p.fetchProfileCatalog(ctx, userID)
+
+	catalogStr := formatProfileCatalog(catalog)
+	systemPrompt := prompts.BuildRetrievalSystemPrompt(catalogStr)
 	toolResp, err := p.Model.SelectTools(ctx, req.Query, catalog)
 	if err != nil {
 		return contracts.RetrieveResponse{}, err
 	}
+	_ = systemPrompt
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -54,7 +59,10 @@ func (p *RetrievalPipeline) Run(ctx context.Context, req contracts.RetrieveReque
 	}
 
 	contextText := formatSources(sources)
-	answerResp, err := p.Model.Generate(ctx, "CONTEXT:\n"+contextText+"\n\nQUERY:\n"+req.Query)
+	answerPrompt := prompts.BuildAnswerPrompt(contextText, req.Query)
+	answerResp, err := p.Model.GenerateWithMessages(ctx, []models.Message{
+		{Role: "user", Content: answerPrompt},
+	})
 	if err != nil {
 		return contracts.RetrieveResponse{}, err
 	}
@@ -237,4 +245,21 @@ func cloneMeta(in map[string]any) map[string]any {
 
 func round3(v float64) float64 {
 	return math.Round(v*1000) / 1000
+}
+
+func formatProfileCatalog(catalog []map[string]string) string {
+	if len(catalog) == 0 {
+		return "(No profile data stored yet)"
+	}
+	lines := make([]string, 0, len(catalog))
+	for _, item := range catalog {
+		topic := item["topic"]
+		subTopic := item["sub_topic"]
+		if subTopic != "" {
+			lines = append(lines, fmt.Sprintf("  - %s / %s", topic, subTopic))
+		} else {
+			lines = append(lines, fmt.Sprintf("  - %s", topic))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
