@@ -59,6 +59,7 @@ tests/
 benchmarks/
 LongMemEval/
 backboard/
+rust/
 
 # Empty root files
 Makefile
