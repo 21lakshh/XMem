@@ -103,3 +103,32 @@ func TestRunRetriesAndDeadLetters(t *testing.T) {
 		t.Fatalf("status=%s error=%q", stored.Status, stored.Error)
 	}
 }
+
+func TestRunDeadLettersTimedOutHandler(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	job, _, err := store.Enqueue(ctx, EnqueueInput{
+		JobType:           "memory_ingest",
+		Payload:           map[string]any{"user_query": "hello"},
+		IdempotencyFields: map[string]any{"user_query": "hello"},
+		UserID:            "alice",
+		TimeoutSeconds:    0.01,
+		MaxAttempts:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	Run(ctx, store, nil, job.ID, func(context.Context) (any, error) {
+		time.Sleep(50 * time.Millisecond)
+		return map[string]any{"too": "late"}, nil
+	})
+
+	stored, ok, err := store.Get(ctx, job.ID)
+	if err != nil || !ok {
+		t.Fatalf("stored job missing err=%v ok=%v", err, ok)
+	}
+	if stored.Status != StatusDeadLetter || stored.Error == "" {
+		t.Fatalf("status=%s error=%q", stored.Status, stored.Error)
+	}
+}
