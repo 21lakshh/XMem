@@ -114,7 +114,7 @@ def _public_exception_message(exc: Exception) -> str:
     if isinstance(exc, TimeoutError):
         return "The request timed out while waiting for an LLM response."
     if isinstance(exc, ValueError):
-        return message or "Invalid request."
+        return "Invalid request."
     if isinstance(exc, ConnectionError):
         return "A backend service is unavailable. Check the server logs with the request_id for details."
     if isinstance(exc, RuntimeError):
