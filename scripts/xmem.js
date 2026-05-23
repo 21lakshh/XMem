@@ -420,6 +420,7 @@ function ollamaRunning() {
 function waitForContainers(names, timeoutSeconds = 180) {
   const pending = new Set(names);
   const deadline = Date.now() + timeoutSeconds * 1000;
+  let waitLogged = false;
 
   while (Date.now() < deadline) {
     for (const name of [...pending]) {
@@ -450,7 +451,11 @@ function waitForContainers(names, timeoutSeconds = 180) {
       return;
     }
 
-    log(`Waiting for local database containers: ${[...pending].join(", ")}`);
+    if (!waitLogged) {
+      log("Waiting for local database containers to become healthy. First startup can take 1-2 minutes.");
+      waitLogged = true;
+    }
+    log(`Still waiting for: ${[...pending].join(", ")}`);
     sleep(5000);
   }
 
@@ -526,8 +531,9 @@ function pythonHasPip(pythonPath) {
 function ensureVirtualenv() {
   const venvPython = venvPythonPath();
   if (!fs.existsSync(venvPython)) {
-    log("Creating XMem virtualenv");
+    log("Creating XMem virtualenv. Keep this terminal open; Windows may take a minute here.");
     run(systemPythonCommand(), ["-m", "venv", path.join(root, ".venv")]);
+    log("XMem virtualenv created");
   }
 
   if (!pythonHasPip(venvPython)) {
