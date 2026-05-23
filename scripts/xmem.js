@@ -528,6 +528,16 @@ function pythonHasPip(pythonPath) {
   return run(pythonPath, ["-m", "pip", "--version"], { capture: true, allowFailure: true }).status === 0;
 }
 
+function pythonHasModule(pythonPath, moduleName) {
+  if (!fs.existsSync(pythonPath)) {
+    return false;
+  }
+  return run(pythonPath, ["-c", `import ${moduleName}`], {
+    capture: true,
+    allowFailure: true,
+  }).status === 0;
+}
+
 function ensureVirtualenv() {
   const venvPython = venvPythonPath();
   if (!fs.existsSync(venvPython)) {
@@ -553,10 +563,12 @@ function ensureVirtualenv() {
 }
 
 function setupLooksComplete(reposDir) {
+  const venvPython = venvPythonPath();
   return (
     fs.existsSync(path.join(root, "pyproject.toml")) &&
     fs.existsSync(path.join(root, ".env")) &&
-    fs.existsSync(venvPythonPath()) &&
+    pythonHasPip(venvPython) &&
+    pythonHasModule(venvPython, "uvicorn") &&
     fs.existsSync(path.join(reposDir, "xmem-extension", ".git")) &&
     fs.existsSync(path.join(reposDir, "xmem-extension", "dist", "manifest.json"))
   );
@@ -621,7 +633,6 @@ function runSetup(args) {
   if (!options.skipPythonInstall) {
     const venvPython = ensureVirtualenv();
     log("Installing XMem local dependencies");
-    run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
     run(venvPython, ["-m", "pip", "install", "-e", `${root}[local,dev]`]);
   }
 
