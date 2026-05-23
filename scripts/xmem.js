@@ -9,13 +9,13 @@ const command = process.argv[2] || "help";
 const passthroughArgs = process.argv.slice(3);
 
 const commands = {
-  setup: "install.ps1",
-  start: "start.ps1",
-  verify: "verify.ps1",
-  doctor: "doctor.ps1",
-  "context:export": "context-export.ps1",
-  "context:import": "context-import.ps1",
-  "context:sync": "context-sync.ps1",
+  setup: "install",
+  start: "start",
+  verify: "verify",
+  doctor: "doctor",
+  "context:export": "context-export",
+  "context:import": "context-import",
+  "context:sync": "context-sync",
 };
 
 function log(message) {
@@ -58,15 +58,28 @@ function powershellArgs(scriptPath, extraArgs) {
   return args;
 }
 
-function runPowerShellScript(scriptName, extraArgs = []) {
-  const scriptPath = path.join(root, "scripts", scriptName);
+function shellArgs(scriptPath, extraArgs) {
+  return [scriptPath, ...extraArgs];
+}
+
+function runScript(scriptName, extraArgs = []) {
+  const extension = process.platform === "win32" ? ".ps1" : ".sh";
+  const executable =
+    process.platform === "win32"
+      ? powershellExecutable()
+      : process.env.XMEM_SHELL || "bash";
+  const scriptPath = path.join(root, "scripts", `${scriptName}${extension}`);
   if (!fs.existsSync(scriptPath)) {
     console.error(`[xmem] Missing script: ${scriptPath}`);
     process.exit(1);
   }
 
-  const executable = powershellExecutable();
-  const result = spawnSync(executable, powershellArgs(scriptPath, extraArgs), {
+  const args =
+    process.platform === "win32"
+      ? powershellArgs(scriptPath, extraArgs)
+      : shellArgs(scriptPath, extraArgs);
+
+  const result = spawnSync(executable, args, {
     cwd: root,
     stdio: "inherit",
     shell: false,
@@ -76,7 +89,7 @@ function runPowerShellScript(scriptName, extraArgs = []) {
     const installHint =
       process.platform === "win32"
         ? "PowerShell should be available on Windows. Reopen the terminal and try again."
-        : "Install PowerShell 7+ (`pwsh`) and try again.";
+        : "Install bash, or set XMEM_SHELL to a compatible shell.";
     console.error(`[xmem] Could not start ${executable}: ${result.error.message}`);
     console.error(`[xmem] ${installHint}`);
     process.exit(1);
@@ -137,13 +150,13 @@ function runDev() {
 
   if (!setupLooksComplete(reposDir)) {
     log("First run detected; running setup before starting XMem.");
-    const setupStatus = runPowerShellScript(commands.setup, passthroughArgs);
+    const setupStatus = runScript(commands.setup, passthroughArgs);
     if (setupStatus !== 0) {
       process.exit(setupStatus);
     }
   }
 
-  return runPowerShellScript(commands.start, startCompatibleArgs(passthroughArgs));
+  return runScript(commands.start, startCompatibleArgs(passthroughArgs));
 }
 
 if (command === "help" || command === "--help" || command === "-h") {
@@ -153,7 +166,7 @@ if (command === "help" || command === "--help" || command === "-h") {
 if (command === "dev") {
   runDev();
 } else if (commands[command]) {
-  runPowerShellScript(commands[command], passthroughArgs);
+  runScript(commands[command], passthroughArgs);
 } else {
   console.error(`[xmem] Unknown command: ${command}`);
   usage(1);

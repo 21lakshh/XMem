@@ -164,6 +164,7 @@ function Sync-Repo {
             throw "$target exists but is not a git checkout."
         }
         Write-Step "Updating $Name"
+        Invoke-Native { git -C $target reset --hard }
         Invoke-Native { git -C $target fetch origin }
         Invoke-Native { git -C $target checkout $Branch }
         Invoke-Native { git -C $target pull --ff-only origin $Branch }

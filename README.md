@@ -317,7 +317,15 @@ cd xmem
 npm run dev
 ```
 
-This creates a local XMem workspace, installs the backend, starts local storage, builds the Chrome extension, and launches the API at `http://localhost:8000`.
+This works on Windows, macOS, and Linux. It creates a local XMem workspace, installs the backend, starts local storage, builds the Chrome extension, and launches the API at `http://localhost:8000`.
+
+Local prerequisites:
+
+- Git
+- Node.js 20+
+- Python 3.11+
+- Docker Desktop
+- Ollama, unless you add a cloud LLM key to `.env`
 
 After setup, load the extension from:
 
