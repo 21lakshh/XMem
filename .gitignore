@@ -52,9 +52,6 @@ logs/
 
 # Dev-only folders
 frontend/
-scripts/
-!scripts/
-!scripts/benchmark_v2_ingest.py
 tests/
 !tests/
 !tests/**/*.py
@@ -96,3 +93,8 @@ src/api/routes/search.py
 # Misc
 error.json
 MIGRATION_PLAN.md
+node_modules/
+repos/
+exports/
+tmp/
+.xmem/
