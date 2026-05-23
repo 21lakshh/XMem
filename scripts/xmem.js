@@ -866,8 +866,38 @@ function ensureVirtualenv() {
 
   if (!fs.existsSync(venvPython)) {
     log("Creating XMem virtualenv. Keep this terminal open; XMem will use it automatically.");
-    run(systemPythonCommand(), ["-m", "venv", venvDir]);
-    log("XMem virtualenv created");
+    const create = run(systemPythonCommand(), ["-m", "venv", venvDir], {
+      allowFailure: true,
+      capture: true,
+    });
+    if (create.status !== 0) {
+      const createDetail = String(create.stderr || create.stdout || "").trim().split(/\r?\n/)[0];
+      if (fs.existsSync(venvPython)) {
+        warn("Virtualenv creation reported an error after creating Python; continuing with in-place repair.");
+        if (createDetail) {
+          warn(`Virtualenv creation detail: ${createDetail}`);
+        }
+      } else {
+        if (fs.existsSync(venvDir)) {
+          warn("Virtualenv creation failed before Python was available; recreating .venv.");
+          fs.rmSync(venvDir, { recursive: true, force: true });
+        }
+        const retry = run(systemPythonCommand(), ["-m", "venv", venvDir], {
+          allowFailure: true,
+          capture: true,
+        });
+        if (retry.status !== 0 || !fs.existsSync(venvPython)) {
+          const retryDetail = String(retry.stderr || retry.stdout || createDetail || "").trim().split(/\r?\n/)[0];
+          fail(
+            `XMem virtualenv could not be created. ${retryDetail || "Install Python with venv support and rerun npm run dev."}`,
+            2,
+          );
+        }
+      }
+    }
+    if (fs.existsSync(venvPython)) {
+      log("XMem virtualenv created");
+    }
   } else if (!fs.existsSync(activationScript)) {
     warn("XMem virtualenv exists but activation scripts are missing; repairing it.");
     const repair = run(systemPythonCommand(), ["-m", "venv", "--upgrade", venvDir], {
