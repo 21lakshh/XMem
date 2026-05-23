@@ -238,7 +238,22 @@ function systemPythonCommand() {
 }
 
 function venvPythonPath() {
-  return path.join(root, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
+  return path.join(venvDirPath(), isWindows ? "Scripts/python.exe" : "bin/python");
+}
+
+function venvDirPath() {
+  return path.join(root, ".venv");
+}
+
+function venvActivationPath() {
+  return path.join(venvDirPath(), isWindows ? "Scripts/Activate.ps1" : "bin/activate");
+}
+
+function activationHint() {
+  if (isWindows) {
+    return ".\\.venv\\Scripts\\Activate.ps1 in PowerShell, or .\\.venv\\Scripts\\activate.bat in cmd.exe";
+  }
+  return "source .venv/bin/activate";
 }
 
 function pythonForRuntime() {
@@ -364,6 +379,8 @@ function configureEnv(envPath, quiet = false) {
       log(`Detected cloud LLM provider(s): ${providers.join(", ")}`);
       log("Configured XMem to avoid Ollama for LLM and embedding calls.");
     }
+    syncCustomPostgresUrls(envPath, quiet);
+    syncMongoUrl(envPath, quiet);
     return providers;
   }
 
@@ -378,11 +395,184 @@ function configureEnv(envPath, quiet = false) {
     log("No cloud LLM provider keys detected.");
     log("Configured XMem to use local Ollama for LLM and embedding calls.");
   }
+  syncCustomPostgresUrls(envPath, quiet);
+  syncMongoUrl(envPath, quiet);
   return [];
 }
 
 function dotEnvValue(envPath, name, fallback = "") {
   return readDotEnv(envPath)[name] || fallback;
+}
+
+function effectiveEnvValue(envPath, name, fallback = "") {
+  const envValue = process.env[name];
+  if (envValue !== undefined && String(envValue).trim() !== "") {
+    return stripQuotes(envValue);
+  }
+  return dotEnvValue(envPath, name, fallback);
+}
+
+function normalizePostgresUrl(value) {
+  const text = stripQuotes(value || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    const url = new URL(text);
+    if (!["postgres:", "postgresql:"].includes(url.protocol)) {
+      return null;
+    }
+    return {
+      host: url.hostname.toLowerCase().replace(/^\[|\]$/g, ""),
+      port: url.port || "5432",
+      username: decodeURIComponent(url.username || ""),
+      password: decodeURIComponent(url.password || ""),
+      database: decodeURIComponent((url.pathname || "").replace(/^\/+/, "")),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isDockerPostgresUrl(value) {
+  const parsed = normalizePostgresUrl(value);
+  if (!parsed) {
+    return false;
+  }
+  return (
+    ["localhost", "127.0.0.1", "::1"].includes(parsed.host) &&
+    parsed.port === "15432" &&
+    parsed.username === "xmem" &&
+    parsed.password === "xmem" &&
+    parsed.database === "xmem"
+  );
+}
+
+function activePostgresUrls(envPath) {
+  const vectorStoreProvider = effectiveEnvValue(envPath, "VECTOR_STORE_PROVIDER", "pinecone").toLowerCase();
+  const appStoreProvider = effectiveEnvValue(envPath, "APP_STORE_PROVIDER", "mongo").toLowerCase();
+  const pgvectorUrl = effectiveEnvValue(envPath, "PGVECTOR_URL", "postgresql://xmem:xmem@localhost:5432/xmem");
+  const appPostgresUrl = effectiveEnvValue(envPath, "APP_POSTGRES_URL", pgvectorUrl) || pgvectorUrl;
+  const urls = [];
+
+  if (vectorStoreProvider === "pgvector") {
+    urls.push({ name: "PGVECTOR_URL", url: pgvectorUrl });
+  }
+  if (appStoreProvider === "postgres") {
+    urls.push({ name: "APP_POSTGRES_URL", url: appPostgresUrl });
+  }
+
+  return urls.filter((entry) => entry.url);
+}
+
+function resolvedActivePostgresUrls(envPath) {
+  const urls = activePostgresUrls(envPath);
+  const custom = urls.find((entry) => normalizePostgresUrl(entry.url) && !isDockerPostgresUrl(entry.url));
+  if (!custom) {
+    return urls;
+  }
+  return urls.map((entry) => (isDockerPostgresUrl(entry.url) ? { ...entry, url: custom.url } : entry));
+}
+
+function dockerPostgresNeeded(envPath) {
+  return resolvedActivePostgresUrls(envPath).some((entry) => isDockerPostgresUrl(entry.url));
+}
+
+function customPostgresUrl(envPath) {
+  const custom = activePostgresUrls(envPath).find((entry) => normalizePostgresUrl(entry.url) && !isDockerPostgresUrl(entry.url));
+  return custom ? custom.url : "";
+}
+
+function syncCustomPostgresUrls(envPath, quiet = false) {
+  const url = customPostgresUrl(envPath);
+  if (!url) {
+    return;
+  }
+
+  const updates = {};
+  const vectorStoreProvider = effectiveEnvValue(envPath, "VECTOR_STORE_PROVIDER", "pinecone").toLowerCase();
+  const appStoreProvider = effectiveEnvValue(envPath, "APP_STORE_PROVIDER", "mongo").toLowerCase();
+  const pgvectorUrl = effectiveEnvValue(envPath, "PGVECTOR_URL", "");
+  const appPostgresUrl = effectiveEnvValue(envPath, "APP_POSTGRES_URL", "");
+
+  if (vectorStoreProvider === "pgvector" && (!pgvectorUrl || isDockerPostgresUrl(pgvectorUrl))) {
+    updates.PGVECTOR_URL = url;
+  }
+  if (appStoreProvider === "postgres" && (!appPostgresUrl || isDockerPostgresUrl(appPostgresUrl))) {
+    updates.APP_POSTGRES_URL = url;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    setDotEnvValues(envPath, updates);
+    if (!quiet) {
+      log("Configured active Postgres settings to use the custom Postgres URL from .env.");
+    }
+  }
+}
+
+function normalizeMongoUrl(value) {
+  const text = stripQuotes(value || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    const url = new URL(text);
+    if (!["mongodb:", "mongodb+srv:"].includes(url.protocol)) {
+      return null;
+    }
+    return {
+      protocol: url.protocol,
+      host: url.hostname.toLowerCase().replace(/^\[|\]$/g, ""),
+      port: url.protocol === "mongodb+srv:" ? "" : url.port || "27017",
+      username: decodeURIComponent(url.username || ""),
+      password: decodeURIComponent(url.password || ""),
+      database: decodeURIComponent((url.pathname || "").replace(/^\/+/, "")),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mongoUrl(envPath) {
+  return effectiveEnvValue(envPath, "MONGODB_URI", "mongodb://localhost:27018");
+}
+
+function isDockerMongoUrl(value) {
+  const parsed = normalizeMongoUrl(value);
+  if (!parsed) {
+    return false;
+  }
+  return (
+    parsed.protocol === "mongodb:" &&
+    ["localhost", "127.0.0.1", "::1"].includes(parsed.host) &&
+    parsed.port === "27018" &&
+    !parsed.username &&
+    !parsed.password
+  );
+}
+
+function dockerMongoNeeded(envPath) {
+  const url = mongoUrl(envPath);
+  return !url || isDockerMongoUrl(url);
+}
+
+function customMongoUrl(envPath) {
+  const url = mongoUrl(envPath);
+  return url && !isDockerMongoUrl(url) ? url : "";
+}
+
+function syncMongoUrl(envPath, quiet = false) {
+  const envUrl = process.env.MONGODB_URI;
+  const fileUrl = dotEnvValue(envPath, "MONGODB_URI", "");
+  if ((envUrl !== undefined && String(envUrl).trim() !== "") || fileUrl) {
+    return;
+  }
+  setDotEnvValues(envPath, { MONGODB_URI: "mongodb://localhost:27018" });
+  if (!quiet) {
+    log("Configured MongoDB to use Docker-managed Mongo on localhost:27018.");
+  }
 }
 
 function usesOllama(envPath) {
@@ -463,13 +653,40 @@ function waitForContainers(names, timeoutSeconds = 180) {
   throw new Error(`Timed out waiting for local database containers: ${[...pending].join(", ")}. Run npm run doctor for details.`);
 }
 
-function startDockerServices() {
+function startDockerServices(envPath) {
   if (!dockerRunning()) {
     return false;
   }
+  const services = ["neo4j"];
+  const containers = ["xmem-neo4j"];
+  const skippedServices = [];
+  if (dockerPostgresNeeded(envPath)) {
+    services.unshift("postgres");
+    containers.unshift("xmem-postgres");
+  } else if (resolvedActivePostgresUrls(envPath).length > 0) {
+    log("Custom Postgres URL detected; skipping Docker Postgres.");
+    skippedServices.push("postgres");
+  } else {
+    log("Active providers do not use Postgres; skipping Docker Postgres.");
+    skippedServices.push("postgres");
+  }
+  if (dockerMongoNeeded(envPath)) {
+    services.splice(services.includes("postgres") ? 1 : 0, 0, "mongo");
+    containers.splice(containers.includes("xmem-postgres") ? 1 : 0, 0, "xmem-mongo");
+  } else {
+    log("Custom MongoDB URI detected; skipping Docker Mongo.");
+    skippedServices.push("mongo");
+  }
+
   log("Starting local Docker services");
-  run("docker", ["compose", "-f", path.join(root, "docker-compose.local.yml"), "up", "-d", "--remove-orphans"]);
-  waitForContainers(["xmem-postgres", "xmem-mongo", "xmem-neo4j"]);
+  run("docker", ["compose", "-f", path.join(root, "docker-compose.local.yml"), "up", "-d", "--remove-orphans", ...services]);
+  if (skippedServices.length > 0) {
+    run("docker", ["compose", "-f", path.join(root, "docker-compose.local.yml"), "stop", ...skippedServices], {
+      allowFailure: true,
+      capture: true,
+    });
+  }
+  waitForContainers(containers);
   return true;
 }
 
@@ -486,6 +703,27 @@ function canBindPort(port, host = "0.0.0.0") {
   });
 }
 
+function canConnectTcp(host, port, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port: Number(port) });
+    let settled = false;
+
+    function finish(ok, error) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolve({ ok, error });
+    }
+
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false, new Error("connection timed out")));
+    socket.once("error", (error) => finish(false, error));
+  });
+}
+
 async function assertApiPortAvailable(port = 8000) {
   const result = await canBindPort(port);
   if (result.ok) {
@@ -497,6 +735,62 @@ async function assertApiPortAvailable(port = 8000) {
   }
 
   throw result.error || new Error(`Could not check port ${port}.`);
+}
+
+async function assertCustomPostgresReachable(envPath) {
+  const customUrls = resolvedActivePostgresUrls(envPath).filter((entry) => !isDockerPostgresUrl(entry.url));
+  const checked = new Set();
+
+  for (const entry of customUrls) {
+    const parsed = normalizePostgresUrl(entry.url);
+    if (!parsed) {
+      fail(`${entry.name} must be a postgres:// or postgresql:// URL. Fix it, or remove it to use Docker-managed Postgres.`, 2);
+    }
+    if (!parsed.host) {
+      continue;
+    }
+
+    const key = `${parsed.host}:${parsed.port}`;
+    if (checked.has(key)) {
+      continue;
+    }
+    checked.add(key);
+
+    const result = await canConnectTcp(parsed.host, parsed.port);
+    if (!result.ok) {
+      fail(
+        `Configured Postgres is not reachable at ${key}. Start local Postgres, fix ${entry.name}, or remove the custom Postgres URL to use Docker-managed Postgres.`,
+        2,
+      );
+    }
+  }
+}
+
+async function assertCustomMongoReachable(envPath) {
+  const url = customMongoUrl(envPath);
+  if (!url) {
+    return;
+  }
+
+  const parsed = normalizeMongoUrl(url);
+  if (!parsed) {
+    fail("MONGODB_URI must be a mongodb:// or mongodb+srv:// URL. Fix it, or remove it to use Docker-managed Mongo.", 2);
+  }
+  if (parsed.protocol === "mongodb+srv:") {
+    return;
+  }
+  if (!parsed.host) {
+    return;
+  }
+
+  const key = `${parsed.host}:${parsed.port}`;
+  const result = await canConnectTcp(parsed.host, parsed.port);
+  if (!result.ok) {
+    fail(
+      `Configured MongoDB is not reachable at ${key}. Start local MongoDB, fix MONGODB_URI, or remove the custom MongoDB URI to use Docker-managed Mongo.`,
+      2,
+    );
+  }
 }
 
 function installedOllamaModels() {
@@ -566,11 +860,39 @@ function pythonHasModule(pythonPath, moduleName) {
 }
 
 function ensureVirtualenv() {
+  const venvDir = venvDirPath();
   const venvPython = venvPythonPath();
+  const activationScript = venvActivationPath();
+
   if (!fs.existsSync(venvPython)) {
-    log("Creating XMem virtualenv. Keep this terminal open; Windows may take a minute here.");
-    run(systemPythonCommand(), ["-m", "venv", path.join(root, ".venv")]);
+    log("Creating XMem virtualenv. Keep this terminal open; XMem will use it automatically.");
+    run(systemPythonCommand(), ["-m", "venv", venvDir]);
     log("XMem virtualenv created");
+  } else if (!fs.existsSync(activationScript)) {
+    warn("XMem virtualenv exists but activation scripts are missing; repairing it.");
+    const repair = run(systemPythonCommand(), ["-m", "venv", "--upgrade", venvDir], {
+      allowFailure: true,
+      capture: true,
+    });
+    if (repair.status !== 0 || !fs.existsSync(activationScript)) {
+      if (pythonHasPip(venvPython)) {
+        const repairDetail = String(repair.stderr || repair.stdout || "").trim().split(/\r?\n/)[0];
+        if (repairDetail) {
+          warn(`Virtualenv activation repair could not finish: ${repairDetail}`);
+        }
+        warn("Virtualenv activation repair did not complete, but the runtime venv is usable.");
+      } else {
+        warn("Virtualenv repair did not complete; recreating .venv.");
+        fs.rmSync(venvDir, { recursive: true, force: true });
+        log("Creating XMem virtualenv. Keep this terminal open; XMem will use it automatically.");
+        run(systemPythonCommand(), ["-m", "venv", venvDir]);
+        log("XMem virtualenv created");
+      }
+    }
+  }
+
+  if (!fs.existsSync(venvPython)) {
+    fail("XMem virtualenv was not created correctly. Delete .venv and rerun npm run setup.", 2);
   }
 
   if (!pythonHasPip(venvPython)) {
@@ -584,6 +906,11 @@ function ensureVirtualenv() {
         2,
       );
     }
+  }
+
+  if (!fs.existsSync(activationScript)) {
+    warn("Manual virtualenv activation scripts are still missing. XMem can run without manual activation.");
+    warn(`To repair manual activation, stop XMem and rerun npm run setup. Then use: ${activationHint()}.`);
   }
 
   return venvPython;
@@ -649,7 +976,7 @@ function runSetup(args) {
   }
 
   if (!options.skipDocker) {
-    if (!startDockerServices()) {
+    if (!startDockerServices(envTarget)) {
       warn("Docker Desktop is installed but not running, or Docker was not found.");
       warn("Start Docker Desktop, wait until it says Docker is running, then rerun this command.");
       warn("Temporary escape hatch: rerun npm run setup -- --skip-docker to continue without local databases.");
@@ -702,11 +1029,13 @@ async function runStart(args) {
   }
 
   if (!options.skipDocker) {
-    if (!startDockerServices()) {
+    if (!startDockerServices(envTarget)) {
       fail("Docker Desktop is installed but not running, or Docker was not found. Start Docker Desktop, then rerun npm run dev.", 2);
     }
   }
 
+  await assertCustomPostgresReachable(envTarget);
+  await assertCustomMongoReachable(envTarget);
   const python = pythonForRuntime();
   await assertApiPortAvailable(8000);
   log("Starting XMem API at http://localhost:8000");
@@ -786,6 +1115,14 @@ async function runDoctor(args) {
   if (!pythonOk) failures += 1;
   writeCheck("Python", pythonOk, "Python 3.11+ lookup", "Install Python 3.11+ and reopen this terminal.");
 
+  const venvOk = fs.existsSync(venvPythonPath()) && pythonHasPip(venvPythonPath());
+  if (!venvOk) failures += 1;
+  writeCheck("XMem virtualenv", venvOk, ".venv health", "Run npm run setup to repair it.");
+
+  const activationOk = fs.existsSync(venvActivationPath());
+  if (!activationOk) failures += 1;
+  writeCheck("Manual venv activation", activationOk, activationHint(), "Stop XMem, then run npm run setup to restore activation scripts.");
+
   const dockerOk = dockerRunning();
   if (!dockerOk) failures += 1;
   writeCheck("Docker", dockerOk, "local database runtime", "Start Docker Desktop, then rerun npm run dev.");
@@ -807,6 +1144,53 @@ async function runDoctor(args) {
   writeCheck("XMem .env", envExists, envPath, "Run npm run setup to create it from templates/xmem.env.local.");
 
   if (envExists) {
+    const activePgUrls = resolvedActivePostgresUrls(envPath);
+    if (dockerPostgresNeeded(envPath)) {
+      writeCheck("Postgres runtime", true, "Docker-managed xmem-postgres on localhost:15432");
+    } else if (activePgUrls.length > 0) {
+      writeCheck("Postgres runtime", true, "custom/local Postgres from .env; Docker Postgres will be skipped");
+      const checked = new Set();
+      for (const entry of activePgUrls.filter((item) => !isDockerPostgresUrl(item.url))) {
+        const parsed = normalizePostgresUrl(entry.url);
+        if (!parsed) {
+          failures += 1;
+          writeCheck(entry.name, false, "invalid Postgres URL", "Use a postgres:// or postgresql:// URL.");
+          continue;
+        }
+        if (!parsed.host) {
+          continue;
+        }
+        const key = `${parsed.host}:${parsed.port}`;
+        if (checked.has(key)) {
+          continue;
+        }
+        checked.add(key);
+        const reachable = await canConnectTcp(parsed.host, parsed.port);
+        if (!reachable.ok) failures += 1;
+        writeCheck(`Postgres ${key}`, reachable.ok, entry.name, `Start Postgres or fix ${entry.name}.`);
+      }
+    } else {
+      writeCheck("Postgres runtime", true, "not used by active providers");
+    }
+
+    if (dockerMongoNeeded(envPath)) {
+      writeCheck("MongoDB runtime", true, "Docker-managed xmem-mongo on localhost:27018");
+    } else {
+      writeCheck("MongoDB runtime", true, "custom/local MongoDB from .env; Docker Mongo will be skipped");
+      const parsed = normalizeMongoUrl(mongoUrl(envPath));
+      if (!parsed) {
+        failures += 1;
+        writeCheck("MONGODB_URI", false, "invalid MongoDB URI", "Use a mongodb:// or mongodb+srv:// URI.");
+      } else if (parsed.protocol === "mongodb+srv:") {
+        writeCheck("MongoDB URI", true, "mongodb+srv custom URI; application will validate with the MongoDB driver");
+      } else if (parsed.host) {
+        const key = `${parsed.host}:${parsed.port}`;
+        const reachable = await canConnectTcp(parsed.host, parsed.port);
+        if (!reachable.ok) failures += 1;
+        writeCheck(`MongoDB ${key}`, reachable.ok, "MONGODB_URI", "Start MongoDB or fix MONGODB_URI.");
+      }
+    }
+
     const providers = configuredProviders(envPath);
     if (providers.length > 0) {
       writeCheck("LLM routing", true, `cloud key detected: ${providers.join(", ")}; Ollama is not required`);
