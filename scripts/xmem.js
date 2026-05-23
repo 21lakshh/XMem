@@ -519,6 +519,33 @@ function ensurePrerequisites(skipPython = false) {
   }
 }
 
+function pythonHasPip(pythonPath) {
+  return run(pythonPath, ["-m", "pip", "--version"], { capture: true, allowFailure: true }).status === 0;
+}
+
+function ensureVirtualenv() {
+  const venvPython = venvPythonPath();
+  if (!fs.existsSync(venvPython)) {
+    log("Creating XMem virtualenv");
+    run(systemPythonCommand(), ["-m", "venv", path.join(root, ".venv")]);
+  }
+
+  if (!pythonHasPip(venvPython)) {
+    log("Repairing XMem virtualenv pip");
+    const result = run(venvPython, ["-m", "ensurepip", "--upgrade"], {
+      allowFailure: true,
+    });
+    if (result.status !== 0 || !pythonHasPip(venvPython)) {
+      fail(
+        "XMem virtualenv was created, but pip is unavailable. Reinstall Python with venv/pip support, delete .venv, and rerun npm run setup.",
+        2,
+      );
+    }
+  }
+
+  return venvPython;
+}
+
 function setupLooksComplete(reposDir) {
   return (
     fs.existsSync(path.join(root, "pyproject.toml")) &&
@@ -586,11 +613,7 @@ function runSetup(args) {
   }
 
   if (!options.skipPythonInstall) {
-    const venvPython = venvPythonPath();
-    if (!fs.existsSync(venvPython)) {
-      log("Creating XMem virtualenv");
-      run(systemPythonCommand(), ["-m", "venv", path.join(root, ".venv")]);
-    }
+    const venvPython = ensureVirtualenv();
     log("Installing XMem local dependencies");
     run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
     run(venvPython, ["-m", "pip", "install", "-e", `${root}[local,dev]`]);
