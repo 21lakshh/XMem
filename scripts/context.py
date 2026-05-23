@@ -60,6 +60,17 @@ def connect_postgres(env: dict[str, str]):
     return psycopg.connect(env.get("PGVECTOR_URL") or "postgresql://xmem:xmem@localhost:15432/xmem")
 
 
+def pgvector_table_identifier(env: dict[str, str]):
+    from psycopg import sql
+
+    table = env.get("PGVECTOR_TABLE") or "xmem_vectors"
+    parts = table.split(".")
+    for part in parts:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part):
+            raise SystemExit(f"Invalid PGVECTOR_TABLE name: {table}")
+    return sql.Identifier(*parts)
+
+
 def user_filter_values(user_id: str | None) -> list[str]:
     if not user_id:
         return []
@@ -68,24 +79,27 @@ def user_filter_values(user_id: str | None) -> list[str]:
 
 
 def export_pgvector(env: dict[str, str], user_id: str | None) -> list[dict[str, Any]]:
-    table = env.get("PGVECTOR_TABLE") or "xmem_vectors"
+    from psycopg import sql
+
     filters = user_filter_values(user_id)
     params: list[Any] = []
-    where = ""
+    where_sql = sql.SQL("")
     if filters:
-        where = "WHERE metadata->>'user_id' = ANY(%s)"
+        where_sql = sql.SQL("WHERE metadata->>'user_id' = ANY(%s)")
         params.append(filters)
 
     with connect_postgres(env) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT namespace, id, content, embedding::text AS embedding,
                        metadata, created_at, updated_at
                 FROM {table}
                 {where}
                 ORDER BY created_at, namespace, id
-                """,
+                """
+                ).format(table=pgvector_table_identifier(env), where=where_sql),
                 params,
             )
             rows = cur.fetchall()
@@ -185,9 +199,9 @@ def export_context(args: argparse.Namespace) -> None:
 def import_pgvector(env: dict[str, str], rows: list[dict[str, Any]], user_id: str | None) -> int:
     if not rows:
         return 0
+    from psycopg import sql
     from psycopg.types.json import Jsonb
 
-    table = env.get("PGVECTOR_TABLE") or "xmem_vectors"
     with connect_postgres(env) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -196,7 +210,8 @@ def import_pgvector(env: dict[str, str], rows: list[dict[str, Any]], user_id: st
                 if user_id:
                     metadata["user_id"] = normalize_user_id(user_id)
                 cur.execute(
-                    f"""
+                    sql.SQL(
+                        """
                     INSERT INTO {table}(namespace, id, content, embedding, metadata, created_at, updated_at)
                     VALUES (%s, %s, %s, %s::vector, %s, COALESCE(%s::timestamptz, now()), COALESCE(%s::timestamptz, now()))
                     ON CONFLICT(namespace, id) DO UPDATE SET
@@ -204,7 +219,8 @@ def import_pgvector(env: dict[str, str], rows: list[dict[str, Any]], user_id: st
                         embedding = excluded.embedding,
                         metadata = excluded.metadata,
                         updated_at = now()
-                    """,
+                    """
+                    ).format(table=pgvector_table_identifier(env)),
                     (
                         row["namespace"],
                         row["id"],

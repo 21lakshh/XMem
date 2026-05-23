@@ -62,7 +62,6 @@ rust/
 
 # Empty root files
 Makefile
-CHANGELOG.md
 ruff.toml
 
 # GitHub templates (empty)

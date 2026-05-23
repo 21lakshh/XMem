@@ -104,13 +104,21 @@ def _friendly_validation_error(error: dict) -> str:
 
 def _public_exception_message(exc: Exception) -> str:
     message = str(exc).strip()
-    if isinstance(exc, TimeoutError):
+    is_local = settings.environment.lower() in {"development", "dev", "local", "test"}
+
+    if is_local and isinstance(exc, TimeoutError):
         return message or "The request timed out while waiting for an LLM response."
-    if isinstance(exc, (ValueError, RuntimeError, ConnectionError)):
+    if is_local:
         return message or type(exc).__name__
 
-    if settings.environment.lower() in {"development", "dev", "local", "test"}:
-        return message or type(exc).__name__
+    if isinstance(exc, TimeoutError):
+        return "The request timed out while waiting for an LLM response."
+    if isinstance(exc, ValueError):
+        return message or "Invalid request."
+    if isinstance(exc, ConnectionError):
+        return "A backend service is unavailable. Check the server logs with the request_id for details."
+    if isinstance(exc, RuntimeError):
+        return "The request could not be completed. Check the server logs with the request_id."
 
     return "Internal server error. Check the server logs with the request_id for details."
 

@@ -32,6 +32,16 @@ function parseArgs(argv) {
     repo: process.env.XMEM_REPO || DEFAULT_REPO,
     branch: process.env.XMEM_BRANCH || DEFAULT_BRANCH,
   };
+  let targetSet = false;
+
+  function readOptionValue(index, name) {
+    const value = argv[index + 1];
+    if (!value || value.startsWith("-")) {
+      console.error(`[create-xmem] ${name} requires a value.`);
+      usage(1);
+    }
+    return value;
+  }
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -41,13 +51,13 @@ function parseArgs(argv) {
     }
 
     if (arg === "--repo") {
-      options.repo = argv[index + 1];
+      options.repo = readOptionValue(index, arg);
       index += 1;
       continue;
     }
 
     if (arg === "--branch") {
-      options.branch = argv[index + 1];
+      options.branch = readOptionValue(index, arg);
       index += 1;
       continue;
     }
@@ -57,7 +67,14 @@ function parseArgs(argv) {
       usage(1);
     }
 
-    options.target = arg;
+    if (!targetSet) {
+      options.target = arg;
+      targetSet = true;
+      continue;
+    }
+
+    console.error(`[create-xmem] Unexpected extra argument: ${arg}`);
+    usage(1);
   }
 
   if (!options.repo || !options.branch) {

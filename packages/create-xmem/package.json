@@ -1,6 +1,6 @@
 {
   "name": "create-xmem",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Create a local XMem workspace.",
   "bin": {
     "create-xmem": "bin/create-xmem.js"
