@@ -104,6 +104,14 @@ class Settings(BaseSettings):
         default=0.4,
         description="LLM temperature for generation"
     )
+    llm_timeout_seconds: float = Field(
+        default=45.0,
+        description="Per-agent LLM call timeout in seconds",
+    )
+    memory_ingest_timeout_seconds: float = Field(
+        default=120.0,
+        description="Overall memory ingest timeout in seconds",
+    )
     fallback_order: List[str] = Field(
         default=["openrouter", "gemini", "claude", "openai"],
         description="Order of LLM providers to try on failure"
