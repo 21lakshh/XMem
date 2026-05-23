@@ -63,20 +63,38 @@ Windows-style flags are also accepted:
   process.exit(exitCode);
 }
 
-function executable(commandName) {
-  if (isWindows && ["npm", "npx"].includes(commandName)) {
-    return `${commandName}.cmd`;
+function commandInvocation(commandName, args) {
+  if (commandName === "npm" && process.env.npm_execpath) {
+    return {
+      command: process.execPath,
+      args: [process.env.npm_execpath, ...args],
+      shell: false,
+    };
   }
-  return commandName;
+
+  if (isWindows && ["npm", "npx"].includes(commandName)) {
+    return {
+      command: commandName,
+      args,
+      shell: true,
+    };
+  }
+
+  return {
+    command: commandName,
+    args,
+    shell: false,
+  };
 }
 
 function run(commandName, args = [], options = {}) {
-  const result = spawnSync(executable(commandName), args, {
+  const invocation = commandInvocation(commandName, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd || root,
     env: options.env || process.env,
     encoding: options.capture ? "utf8" : undefined,
     stdio: options.capture ? "pipe" : "inherit",
-    shell: false,
+    shell: invocation.shell,
   });
 
   if (result.error) {
