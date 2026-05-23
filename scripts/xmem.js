@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs");
+const net = require("node:net");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
@@ -472,6 +473,32 @@ function startDockerServices() {
   return true;
 }
 
+function canBindPort(port, host = "0.0.0.0") {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", (error) => {
+      resolve({ ok: false, error });
+    });
+    server.once("listening", () => {
+      server.close(() => resolve({ ok: true }));
+    });
+    server.listen(port, host);
+  });
+}
+
+async function assertApiPortAvailable(port = 8000) {
+  const result = await canBindPort(port);
+  if (result.ok) {
+    return;
+  }
+
+  if (result.error && result.error.code === "EADDRINUSE") {
+    fail(`Port ${port} is already in use. Stop the existing XMem/API process, then rerun npm run dev.`, 2);
+  }
+
+  throw result.error || new Error(`Could not check port ${port}.`);
+}
+
 function installedOllamaModels() {
   const result = run("ollama", ["list"], { capture: true, allowFailure: true });
   if (result.status !== 0) {
@@ -660,7 +687,7 @@ function runSetup(args) {
   }
 }
 
-function runStart(args) {
+async function runStart(args) {
   const options = parseStartOptions(args);
   const envTarget = path.join(root, ".env");
 
@@ -681,17 +708,18 @@ function runStart(args) {
   }
 
   const python = pythonForRuntime();
+  await assertApiPortAvailable(8000);
   log("Starting XMem API at http://localhost:8000");
   run(python, ["-m", "uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]);
 }
 
-function runDev(args) {
+async function runDev(args) {
   const reposDir = path.resolve(root, readOption(args, ["--repos-dir", "-ReposDir"], "repos"));
   if (!setupLooksComplete(reposDir)) {
     log("First run detected; running setup before starting XMem.");
     runSetup(args);
   }
-  runStart(startCompatibleArgs(args));
+  await runStart(startCompatibleArgs(args));
 }
 
 function runVerify(args) {
@@ -823,9 +851,9 @@ async function main() {
     } else if (command === "setup") {
       runSetup(passthroughArgs);
     } else if (command === "dev") {
-      runDev(passthroughArgs);
+      await runDev(passthroughArgs);
     } else if (command === "start") {
-      runStart(passthroughArgs);
+      await runStart(passthroughArgs);
     } else if (command === "verify") {
       runVerify(passthroughArgs);
     } else if (command === "doctor") {
