@@ -417,6 +417,18 @@ class Settings(BaseSettings):
         default="http://localhost:5173",
         description="Frontend URL for redirects after auth"
     )
+    razorpay_key_id: Optional[str] = Field(
+        default=None,
+        description="Razorpay public key ID used for checkout order creation"
+    )
+    razorpay_key_secret: Optional[str] = Field(
+        default=None,
+        description="Razorpay key secret used only on the API server"
+    )
+    razorpay_webhook_secret: Optional[str] = Field(
+        default=None,
+        description="Optional Razorpay webhook signing secret"
+    )
 
     @field_validator("fallback_order")
     @classmethod
