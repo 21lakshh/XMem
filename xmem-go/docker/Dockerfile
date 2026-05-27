@@ -8,6 +8,6 @@ FROM alpine:3.21
 WORKDIR /app
 COPY --from=build /out/xmem-go /app/xmem-go
 COPY .env.example /app/.env.example
-EXPOSE 8081
+EXPOSE 8002
 CMD ["/app/xmem-go"]
 

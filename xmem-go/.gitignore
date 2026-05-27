@@ -3,4 +3,5 @@
 !.env.example
 coverage.out
 tmp/
+xmem-go
 

@@ -30,12 +30,12 @@ go test ./...
 go run ./cmd/xmem
 ```
 
-The server listens on `http://localhost:8081` by default. Use the dev API key from `.env.example`:
+The server listens on `http://localhost:8002` by default. Use the dev API key from `.env.example`:
 
 ```bash
-curl http://localhost:8081/health
+curl http://localhost:8002/health
 
-curl -X POST http://localhost:8081/v1/memory/ingest \
+curl -X POST http://localhost:8002/v1/memory/ingest \
   -H 'Authorization: Bearer dev-xmem-go-key' \
   -H 'Content-Type: application/json' \
   -d '{"user_query":"My name is Alice and I work at XMem.","user_id":"alice"}'
@@ -43,7 +43,7 @@ curl -X POST http://localhost:8081/v1/memory/ingest \
 # The ingest response returns a durable job_id immediately. Poll the returned
 # status_url until status is "succeeded" before retrieving the newly written memory.
 
-curl -X POST http://localhost:8081/v1/memory/retrieve \
+curl -X POST http://localhost:8002/v1/memory/retrieve \
   -H 'Authorization: Bearer dev-xmem-go-key' \
   -H 'Content-Type: application/json' \
   -d '{"query":"Where do I work?","user_id":"alice","top_k":5}'
