@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+import httpx
 
 from .config import DEFAULT_DATASET_URLS
 
@@ -59,7 +60,16 @@ def download_dataset(variant: str, destination: Path) -> Path:
             f"Unknown dataset variant '{variant}'. Known variants: {known}"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(DEFAULT_DATASET_URLS[variant], destination)
+    with httpx.stream(
+        "GET",
+        DEFAULT_DATASET_URLS[variant],
+        follow_redirects=True,
+        timeout=120.0,
+    ) as response:
+        response.raise_for_status()
+        with destination.open("wb") as handle:
+            for chunk in response.iter_bytes():
+                handle.write(chunk)
     return destination
 
 

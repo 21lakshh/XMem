@@ -93,7 +93,7 @@ class XMemApiClient:
         return await self._request("POST", path, json=payload)
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> ApiCallResult:
-        request_path = path if path.startswith("/") else f"/{path}"
+        request_path = self._request_path(path)
         start = time.perf_counter()
         response: httpx.Response | None = None
         for attempt in range(self.max_retries + 1):
@@ -121,3 +121,9 @@ class XMemApiClient:
         if not isinstance(data, dict):
             data = {"value": data}
         return ApiCallResult(data=data, elapsed_ms=elapsed_ms)
+
+    @staticmethod
+    def _request_path(path: str) -> str:
+        if path.startswith(("http://", "https://", "/")):
+            return path
+        return f"/{path}"

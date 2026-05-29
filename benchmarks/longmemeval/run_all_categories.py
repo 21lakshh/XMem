@@ -246,6 +246,8 @@ def update_state_from_line(state: CategoryState, line: str) -> None:
     if close == -1:
         return
     progress = line[1:close]
+    if "/" not in progress:
+        return
     processed_text, total_text = progress.split("/", 1)
     if processed_text.isdigit() and total_text.isdigit():
         state.processed = max(state.processed, int(processed_text))
@@ -256,6 +258,8 @@ def update_ingest_state_from_line(state: CategoryState, line: str) -> None:
     if not line.startswith("[INGEST] processed="):
         return
     progress = line.split("processed=", 1)[1].strip()
+    if "/" not in progress:
+        return
     processed_text, total_text = progress.split("/", 1)
     if processed_text.isdigit() and total_text.isdigit():
         processed = int(processed_text)
