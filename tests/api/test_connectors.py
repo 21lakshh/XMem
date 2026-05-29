@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -7,7 +8,8 @@ from src.api.dependencies import require_user
 from src.api.routes import connectors
 
 
-def setup_function() -> None:
+@pytest.fixture(autouse=True)
+def _reset_connector_state() -> None:
     connectors._pending_states.clear()
 
 
