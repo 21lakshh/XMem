@@ -200,6 +200,7 @@ async def start_connector_oauth(
     _prune_pending_states()
     state = secrets.token_urlsafe(32)
     expires_at = _now() + timedelta(minutes=STATE_TTL_MINUTES)
+    authorization_url = _build_authorization_url(connector, state)
     _pending_states[state] = PendingOAuthState(
         connector_id=connector.id,
         user_id=str(current_user.get("id")),
@@ -208,7 +209,7 @@ async def start_connector_oauth(
 
     return ConnectorStartResponse(
         connector_id=connector.id,
-        authorization_url=_build_authorization_url(connector, state),
+        authorization_url=authorization_url,
         state=state,
         expires_at=expires_at,
     )
