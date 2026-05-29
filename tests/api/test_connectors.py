@@ -56,7 +56,7 @@ def test_oauth_start_builds_authorization_url_without_secret(monkeypatch) -> Non
     assert body["state"]
 
 
-def test_callback_marks_connection_then_disconnects(monkeypatch) -> None:
+def test_callback_validates_state_without_marking_connected(monkeypatch) -> None:
     monkeypatch.setenv("NOTION_CLIENT_ID", "notion-client")
     client = _client()
 
@@ -65,12 +65,12 @@ def test_callback_marks_connection_then_disconnects(monkeypatch) -> None:
 
     callback = client.get(f"/api/connectors/notion/oauth/callback?code=abc&state={state}")
     assert callback.status_code == 200
-    assert callback.json()["status"] == "connected"
+    assert callback.json()["status"] == "pending"
 
-    connected = client.get("/api/connectors/notion/status")
-    assert connected.status_code == 200
-    assert connected.json()["state"] == "connected"
+    status = client.get("/api/connectors/notion/status")
+    assert status.status_code == 200
+    assert status.json()["state"] == "not_connected"
 
     disconnected = client.post("/api/connectors/notion/disconnect")
     assert disconnected.status_code == 200
-    assert disconnected.json() == {"connector_id": "notion", "disconnected": True}
+    assert disconnected.json() == {"connector_id": "notion", "disconnected": False}

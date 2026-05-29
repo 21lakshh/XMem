@@ -18,6 +18,7 @@ ConnectorId = Literal["notion", "google-drive"]
 ConnectorState = Literal["connected", "not_connected", "pending"]
 
 STATE_TTL_MINUTES = 10
+MAX_PENDING_STATES = 1000
 
 
 class ConnectorDefinition(BaseModel):
@@ -61,13 +62,6 @@ class PendingOAuthState(BaseModel):
     expires_at: datetime
 
 
-class StoredConnection(BaseModel):
-    connector_id: ConnectorId
-    user_id: str
-    connected_at: datetime
-    scopes: List[str]
-
-
 CONNECTORS: Dict[ConnectorId, ConnectorDefinition] = {
     "notion": ConnectorDefinition(
         id="notion",
@@ -93,15 +87,10 @@ CONNECTORS: Dict[ConnectorId, ConnectorDefinition] = {
 }
 
 _pending_states: Dict[str, PendingOAuthState] = {}
-_connections: Dict[str, StoredConnection] = {}
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _connection_key(user_id: str, connector_id: ConnectorId) -> str:
-    return f"{user_id}:{connector_id}"
 
 
 def _client_id(connector_id: ConnectorId) -> Optional[str]:
@@ -129,24 +118,30 @@ def _get_connector(connector_id: str) -> ConnectorDefinition:
     return connector
 
 
-def _status_for(user_id: str, connector: ConnectorDefinition) -> ConnectorStatusResponse:
-    connection = _connections.get(_connection_key(user_id, connector.id))
-    if connection:
-        return ConnectorStatusResponse(
-            id=connector.id,
-            name=connector.name,
-            state="connected",
-            connected_at=connection.connected_at,
-            scopes=connection.scopes,
-            detail="Connected",
-        )
+def _prune_pending_states(now: Optional[datetime] = None) -> None:
+    current_time = now or _now()
+    expired = [
+        key
+        for key, pending in _pending_states.items()
+        if pending.expires_at <= current_time
+    ]
+    for key in expired:
+        _pending_states.pop(key, None)
 
+    overflow = len(_pending_states) - MAX_PENDING_STATES
+    if overflow > 0:
+        oldest = sorted(_pending_states.items(), key=lambda item: item[1].expires_at)
+        for key, _pending in oldest[:overflow]:
+            _pending_states.pop(key, None)
+
+
+def _status_for(user_id: str, connector: ConnectorDefinition) -> ConnectorStatusResponse:
     return ConnectorStatusResponse(
         id=connector.id,
         name=connector.name,
         state="not_connected",
         scopes=connector.scopes,
-        detail="Not connected",
+        detail="OAuth start is available; token exchange and sync storage are not connected yet.",
     )
 
 
@@ -202,6 +197,7 @@ async def start_connector_oauth(
     current_user: dict = Depends(require_user),
 ) -> ConnectorStartResponse:
     connector = _get_connector(connector_id)
+    _prune_pending_states()
     state = secrets.token_urlsafe(32)
     expires_at = _now() + timedelta(minutes=STATE_TTL_MINUTES)
     _pending_states[state] = PendingOAuthState(
@@ -225,25 +221,21 @@ async def connector_oauth_callback(
     state: str = Query(..., min_length=1),
 ) -> dict:
     connector = _get_connector(connector_id)
+    now = _now()
+    _prune_pending_states(now)
     pending = _pending_states.pop(state, None)
-    if not pending or pending.connector_id != connector.id or pending.expires_at <= _now():
+    if not pending or pending.connector_id != connector.id or pending.expires_at <= now:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired connector authorization state",
         )
 
-    # Token exchange and source ingestion are intentionally separate follow-up steps.
-    # This callback validates the flow and records a pending connection marker only.
-    _connections[_connection_key(pending.user_id, connector.id)] = StoredConnection(
-        connector_id=connector.id,
-        user_id=pending.user_id,
-        connected_at=_now(),
-        scopes=connector.scopes,
-    )
+    # Token exchange, encrypted credential storage, and source ingestion are intentionally
+    # separate follow-up steps. Do not mark the connector as connected until those exist.
     return {
-        "status": "connected",
+        "status": "pending",
         "connector_id": connector.id,
-        "detail": f"{connector.name} authorization received",
+        "detail": f"{connector.name} authorization received; token exchange is not enabled yet.",
     }
 
 
@@ -253,6 +245,5 @@ async def disconnect_connector(
     current_user: dict = Depends(require_user),
 ) -> ConnectorDisconnectResponse:
     connector = _get_connector(connector_id)
-    key = _connection_key(str(current_user.get("id")), connector.id)
-    disconnected = _connections.pop(key, None) is not None
+    disconnected = False
     return ConnectorDisconnectResponse(connector_id=connector.id, disconnected=disconnected)
