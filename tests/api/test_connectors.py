@@ -29,7 +29,7 @@ def test_lists_supported_connectors() -> None:
 
 
 def test_oauth_start_requires_configured_client_id(monkeypatch) -> None:
-    monkeypatch.setattr(connectors.settings, "notion_client_id", None, raising=False)
+    monkeypatch.delenv("NOTION_CLIENT_ID", raising=False)
 
     response = _client().post("/api/connectors/notion/oauth/start")
 
@@ -38,13 +38,11 @@ def test_oauth_start_requires_configured_client_id(monkeypatch) -> None:
 
 
 def test_oauth_start_builds_authorization_url_without_secret(monkeypatch) -> None:
-    monkeypatch.setattr(connectors.settings, "google_drive_client_id", "drive-client", raising=False)
-    monkeypatch.setattr(connectors.settings, "google_drive_client_secret", "do-not-leak", raising=False)
-    monkeypatch.setattr(
-        connectors.settings,
-        "google_drive_redirect_uri",
+    monkeypatch.setenv("GOOGLE_DRIVE_CLIENT_ID", "drive-client")
+    monkeypatch.setenv("GOOGLE_DRIVE_CLIENT_SECRET", "do-not-leak")
+    monkeypatch.setenv(
+        "GOOGLE_DRIVE_REDIRECT_URI",
         "http://localhost:8000/api/connectors/google-drive/oauth/callback",
-        raising=False,
     )
 
     response = _client().post("/api/connectors/google-drive/oauth/start")
@@ -59,7 +57,7 @@ def test_oauth_start_builds_authorization_url_without_secret(monkeypatch) -> Non
 
 
 def test_callback_marks_connection_then_disconnects(monkeypatch) -> None:
-    monkeypatch.setattr(connectors.settings, "notion_client_id", "notion-client", raising=False)
+    monkeypatch.setenv("NOTION_CLIENT_ID", "notion-client")
     client = _client()
 
     started = client.post("/api/connectors/notion/oauth/start")

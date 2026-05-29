@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional
 from urllib.parse import urlencode
@@ -11,9 +12,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from src.api.dependencies import require_user
-from src.config import settings
-
-
 router = APIRouter(prefix="/api/connectors", tags=["Connectors"])
 
 ConnectorId = Literal["notion", "google-drive"]
@@ -108,14 +106,20 @@ def _connection_key(user_id: str, connector_id: ConnectorId) -> str:
 
 def _client_id(connector_id: ConnectorId) -> Optional[str]:
     if connector_id == "notion":
-        return settings.notion_client_id
-    return settings.google_drive_client_id
+        return os.getenv("NOTION_CLIENT_ID")
+    return os.getenv("GOOGLE_DRIVE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID")
 
 
 def _redirect_uri(connector_id: ConnectorId) -> str:
     if connector_id == "notion":
-        return settings.notion_redirect_uri
-    return settings.google_drive_redirect_uri
+        return os.getenv(
+            "NOTION_REDIRECT_URI",
+            "http://localhost:8000/api/connectors/notion/oauth/callback",
+        )
+    return os.getenv(
+        "GOOGLE_DRIVE_REDIRECT_URI",
+        "http://localhost:8000/api/connectors/google-drive/oauth/callback",
+    )
 
 
 def _get_connector(connector_id: str) -> ConnectorDefinition:
