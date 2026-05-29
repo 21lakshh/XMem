@@ -401,6 +401,30 @@ class Settings(BaseSettings):
         default="http://localhost:8000/auth/callback",
         description="Google OAuth redirect URI"
     )
+    notion_client_id: Optional[str] = Field(
+        default=None,
+        description="Notion OAuth client ID for the Notion connector"
+    )
+    notion_client_secret: Optional[str] = Field(
+        default=None,
+        description="Notion OAuth client secret for the Notion connector"
+    )
+    notion_redirect_uri: str = Field(
+        default="http://localhost:8000/api/connectors/notion/oauth/callback",
+        description="Notion OAuth redirect URI"
+    )
+    google_drive_client_id: Optional[str] = Field(
+        default=None,
+        description="Google OAuth client ID for the Google Drive connector"
+    )
+    google_drive_client_secret: Optional[str] = Field(
+        default=None,
+        description="Google OAuth client secret for the Google Drive connector"
+    )
+    google_drive_redirect_uri: str = Field(
+        default="http://localhost:8000/api/connectors/google-drive/oauth/callback",
+        description="Google Drive OAuth redirect URI"
+    )
     jwt_secret_key: str = Field(
         default="your-secret-key-change-in-production",
         description="Secret key for JWT token signing (change in production!)"
