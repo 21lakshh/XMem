@@ -146,12 +146,15 @@ jobs:
             set -euo pipefail
             cd "${{ secrets.STAGING_EC2_DEPLOY_PATH }}"
 
-            PR_BRANCH="${{ github.head_ref || github.event.inputs.ref || 'develop' }}"
-            echo "── Deploying branch: $PR_BRANCH ──"
+            DEPLOY_REF="${{ github.head_ref || github.event.inputs.ref || 'develop' }}"
+            echo "── Deploying ref: $DEPLOY_REF ──"
 
-            git fetch origin "$PR_BRANCH"
-            git checkout "$PR_BRANCH"
-            git pull origin "$PR_BRANCH"
+            git fetch origin "$DEPLOY_REF"
+            if git show-ref --verify --quiet "refs/remotes/origin/$DEPLOY_REF"; then
+              git checkout -B "$DEPLOY_REF" "origin/$DEPLOY_REF"
+            else
+              git checkout --detach FETCH_HEAD
+            fi
 
             echo "── Restarting XMem staging service ──"
             sudo systemctl restart xmem-staging
