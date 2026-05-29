@@ -217,8 +217,9 @@ async def start_connector_oauth(
 @router.get("/{connector_id}/oauth/callback")
 async def connector_oauth_callback(
     connector_id: str,
-    code: str = Query(..., min_length=1),
     state: str = Query(..., min_length=1),
+    code: Optional[str] = Query(None, min_length=1),
+    error: Optional[str] = Query(None, min_length=1),
 ) -> dict:
     connector = _get_connector(connector_id)
     now = _now()
@@ -228,6 +229,11 @@ async def connector_oauth_callback(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired connector authorization state",
+        )
+    if error or not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Authorization denied: {error or 'no authorization code received'}",
         )
 
     # Token exchange, encrypted credential storage, and source ingestion are intentionally

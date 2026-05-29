@@ -7,6 +7,10 @@ from src.api.dependencies import require_user
 from src.api.routes import connectors
 
 
+def setup_function() -> None:
+    connectors._pending_states.clear()
+
+
 def _user() -> dict:
     return {"id": "user-1", "email": "user@example.com", "username": "user"}
 
@@ -74,3 +78,18 @@ def test_callback_validates_state_without_marking_connected(monkeypatch) -> None
     disconnected = client.post("/api/connectors/notion/disconnect")
     assert disconnected.status_code == 200
     assert disconnected.json() == {"connector_id": "notion", "disconnected": False}
+
+
+def test_callback_handles_provider_denial_and_consumes_state(monkeypatch) -> None:
+    monkeypatch.setenv("NOTION_CLIENT_ID", "notion-client")
+    client = _client()
+
+    started = client.post("/api/connectors/notion/oauth/start")
+    state = started.json()["state"]
+
+    callback = client.get(f"/api/connectors/notion/oauth/callback?error=access_denied&state={state}")
+
+    assert callback.status_code == 400
+    assert "access_denied" in callback.json()["detail"]
+    retry = client.get(f"/api/connectors/notion/oauth/callback?code=abc&state={state}")
+    assert retry.status_code == 400
