@@ -56,7 +56,16 @@ tests/
 !tests/
 !tests/**/*.py
 benchmarks/
+!benchmarks/
+!benchmarks/README.md
 LongMemEval/
+!benchmarks/longmemeval/
+!benchmarks/longmemeval/**
+benchmarks/longmemeval/**/__pycache__/
+benchmarks/longmemeval/**/*.pyc
+benchmarks/longmemeval/data/
+benchmarks/longmemeval/results/
+benchmarks/longmemeval/outputs/
 backboard/
 rust/
 
