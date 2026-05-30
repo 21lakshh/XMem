@@ -23,7 +23,9 @@ export function redactSecrets(text: string): string {
 	return String(text || "")
 		.replace(/xmem_[A-Za-z0-9_-]{12,}/g, "[redacted-xmem-key]")
 		.replace(/sk-[A-Za-z0-9_-]{16,}/g, "[redacted-api-key]")
-		.replace(/(api[_-]?key|authorization|bearer|token)(\s*[:=]\s*)([^\s"'`]+)/gi, "$1$2[redacted]")
+		.replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"'`]+/gi, "$1[redacted]")
+		.replace(/(bearer\s+)[^\s"'`]+/gi, "$1[redacted]")
+		.replace(/((?:api[_-]?key|authorization|token)\s*[:=]\s*)[^\s"'`]+/gi, "$1[redacted]")
 }
 
 export function truncate(text: string, limit = 12000): string {

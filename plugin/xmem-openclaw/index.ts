@@ -14,14 +14,16 @@ import { registerSearchTool } from "./tools/search.ts"
 import { registerStatusTool } from "./tools/status.ts"
 import { registerStoreTool } from "./tools/store.ts"
 
-try {
-	const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw")
-	const storePath = path.join(stateDir, "memory", "main.sqlite")
-	if (!fs.existsSync(storePath)) {
-		fs.mkdirSync(path.dirname(storePath), { recursive: true })
-		fs.writeFileSync(storePath, "")
-	}
-} catch {}
+function ensureOpenClawMemoryStore(): void {
+	try {
+		const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw")
+		const storePath = path.join(stateDir, "memory", "main.sqlite")
+		if (!fs.existsSync(storePath)) {
+			fs.mkdirSync(path.dirname(storePath), { recursive: true })
+			fs.writeFileSync(storePath, "")
+		}
+	} catch {}
+}
 
 export default {
 	id: "xmem-openclaw",
@@ -33,6 +35,7 @@ export default {
 	register(api: OpenClawPluginApi) {
 		const cfg = parseConfig(api.pluginConfig)
 		initLogger(api.logger, cfg.debug)
+		ensureOpenClawMemoryStore()
 
 		if (!cfg.apiKey) {
 			registerCli(api)
@@ -60,9 +63,6 @@ export default {
 		registerSearchTool(api, client)
 		registerStoreTool(api, client)
 		registerStatusTool(api, client)
-		registerSearchTool(api, client, "xmem-search")
-		registerStoreTool(api, client, "xmem-save")
-		registerStatusTool(api, client, "xmem-status")
 
 		if (cfg.autoRecall) api.on("before_prompt_build", buildRecallHandler(client, cfg))
 		if (cfg.autoCapture) api.on("agent_end", buildCaptureHandler(client))
