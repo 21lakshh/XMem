@@ -33,11 +33,12 @@ export class XMemClient {
 			body: JSON.stringify(payload),
 		})
 
+		const text = await response.text()
 		let body: any
 		try {
-			body = await response.json()
+			body = JSON.parse(text)
 		} catch {
-			body = { error: await response.text() }
+			body = { error: text }
 		}
 
 		if (!response.ok || body?.status === "error") {

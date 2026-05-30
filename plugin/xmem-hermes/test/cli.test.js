@@ -35,3 +35,38 @@ test("installer writes config without copying secret values", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("installer refuses to overwrite existing files unless forced", () => {
+  const root = mkdtempSync(join(tmpdir(), "xmem-hermes-"));
+  try {
+    const first = spawnSync(process.execPath, ["src/cli.js", "install", "--config-root", root], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.equal(first.status, 0, first.stderr);
+
+    const second = spawnSync(process.execPath, ["src/cli.js", "install", "--config-root", root], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /Refusing to overwrite/);
+
+    const forced = spawnSync(process.execPath, ["src/cli.js", "install", "--config-root", root, "--force"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.equal(forced.status, 0, forced.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installer reports missing option values", () => {
+  const result = spawnSync(process.execPath, ["src/cli.js", "install", "--api-url"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--api-url requires a value/);
+});

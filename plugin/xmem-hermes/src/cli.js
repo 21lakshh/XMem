@@ -20,17 +20,35 @@ function parseArgs(argv) {
   const options = {
     command,
     dryRun: false,
+    force: false,
     apiUrl: process.env.XMEM_API_URL || "https://api.xmem.in",
   };
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--dry-run") options.dryRun = true;
-    else if (arg === "--config-root") options.configRoot = argv[++i];
-    else if (arg === "--api-url") options.apiUrl = argv[++i];
-    else if (arg === "--mcp-command") options.mcpCommand = argv[++i];
+    else if (arg === "--force") options.force = true;
+    else if (arg === "--config-root") {
+      options.configRoot = readValue(argv, i, arg);
+      i += 1;
+    } else if (arg === "--api-url") {
+      options.apiUrl = readValue(argv, i, arg);
+      i += 1;
+    } else if (arg === "--mcp-command") {
+      options.mcpCommand = readValue(argv, i, arg);
+      i += 1;
+    }
     else if (arg === "--help" || arg === "-h") options.command = "help";
   }
   return options;
+}
+
+function readValue(argv, index, arg) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) {
+    console.error(arg + " requires a value.");
+    process.exit(1);
+  }
+  return value;
 }
 
 function configRoot(options) {
@@ -100,8 +118,21 @@ function memoryInstructions() {
 
 function install(options) {
   const root = configRoot(options);
-  write(join(root, ".hermes", "config.yaml"), yamlConfig(options), options.dryRun);
-  write(join(root, "HERMES.md"), memoryInstructions(), options.dryRun);
+  const targets = [
+    [join(root, ".hermes", "config.yaml"), yamlConfig(options)],
+    [join(root, "HERMES.md"), memoryInstructions()],
+  ];
+  if (!options.force && !options.dryRun) {
+    const existing = targets.map(([filePath]) => filePath).filter((filePath) => existsSync(filePath));
+    if (existing.length > 0) {
+      console.error("Refusing to overwrite existing file(s): " + existing.join(", "));
+      console.error("Re-run with --force to replace them.");
+      process.exit(1);
+    }
+  }
+  for (const [filePath, content] of targets) {
+    write(filePath, content, options.dryRun);
+  }
   console.log(CONNECTOR.display + " connector install complete.");
   console.log("Keep XMEM_API_KEY in your environment; it was not copied into generated files.");
 }
@@ -170,6 +201,7 @@ Options:
   --config-root <path>    Write config under a custom root
   --api-url <url>         XMem API URL
   --mcp-command <cmd>     MCP launch command, default: uvx xmem-mcp
+  --force                 Replace existing generated files
   --dry-run               Print intended writes
 `);
 }

@@ -40,8 +40,9 @@ function safeUsername(): string {
 	}
 }
 
-export function parseConfig(raw: Record<string, unknown> = {}): XMemOpenClawConfig {
-	if (raw && typeof raw === "object" && Object.keys(raw).length > 0) {
+export function parseConfig(rawConfig: Record<string, unknown> | null | undefined = {}): XMemOpenClawConfig {
+	const raw = rawConfig ?? {}
+	if (Object.keys(raw).length > 0) {
 		assertAllowedKeys(raw)
 	}
 
