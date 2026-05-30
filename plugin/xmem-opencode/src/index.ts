@@ -108,10 +108,9 @@ export const XMemPlugin: Plugin = async (ctx: PluginInput) => {
         }
 
         const isFirstMessage = !injectedSessions.has(input.sessionID);
+        const shouldInjectContext = CONFIG.autoRecallEveryPrompt || isFirstMessage;
 
-        if (isFirstMessage) {
-          injectedSessions.add(input.sessionID);
-
+        if (shouldInjectContext) {
           let memoryContext = "";
 
           if (CONFIG.autoRecallEveryPrompt) {
@@ -151,6 +150,10 @@ export const XMemPlugin: Plugin = async (ctx: PluginInput) => {
               duration: Date.now() - start,
               contextLength: memoryContext.length,
             });
+          }
+
+          if (isFirstMessage) {
+            injectedSessions.add(input.sessionID);
           }
         }
       } catch (error) {
