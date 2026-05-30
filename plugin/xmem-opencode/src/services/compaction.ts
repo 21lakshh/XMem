@@ -438,6 +438,7 @@ export function createCompactionHook(
       }, 500);
     } catch (err) {
       log("[compaction] compaction failed", { sessionID, error: String(err) });
+      state.summarizedSessions.delete(sessionID);
       state.compactionInProgress.delete(sessionID);
     }
   }
