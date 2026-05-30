@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -43,18 +43,13 @@ export function clearCredentials(): boolean {
 }
 
 function openBrowser(url: string): void {
-  const platform = process.platform;
+	const platform = process.platform;
 
-  const commands: Record<string, string> = {
-    darwin: `open "${url}"`,
-    win32: `start "" "${url}"`,
-    linux: `xdg-open "${url}"`,
-  };
-
-  const cmd = commands[platform] ?? `xdg-open "${url}"`;
-  exec(cmd, (err) => {
-    if (err) console.error("Failed to open browser:", err.message);
-  });
+	const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+	const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+	execFile(command, args, (err) => {
+		if (err) console.error("Failed to open browser:", err.message);
+	});
 }
 
 export interface AuthResult {
