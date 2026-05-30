@@ -113,7 +113,8 @@ process.stdin.on("data", (chunk) => {
   buffer += chunk;
   const lines = buffer.split(/\r?\n/);
   buffer = lines.pop() || "";
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/^\uFEFF/, "");
     if (!line.trim()) continue;
     try {
       handle(JSON.parse(line));
