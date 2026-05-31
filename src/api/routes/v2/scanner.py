@@ -143,7 +143,35 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
 
     should_start = created or (durable_job.get("status") == "queued" and not durable_job.get("workflow_id"))
     if should_start:
-        await start_job_workflow(durable_job)
+        try:
+            await start_job_workflow(durable_job)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)
+            failed_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
+            store.upsert_scanner_job(
+                job_id=scanner_job_id,
+                username=username,
+                org=org,
+                repo=repo,
+                branch=branch,
+                url=clone_url,
+                phase1_status="complete" if phase2_only else "failed",
+                phase2_status="failed" if phase2_only else "pending",
+                started_at=started_at,
+                error=error,
+                durable_job_id=durable_job["job_id"],
+                retry_count=int(failed_job.get("retry_count") or 0),
+                timeout_seconds=float(failed_job.get("timeout_seconds") or scanner_v1.SCANNER_DURABLE_TIMEOUT_SECONDS),
+            )
+            return JSONResponse({
+                "status": "error",
+                "job_id": scanner_job_id,
+                "durable_job_id": durable_job["job_id"],
+                "org": org,
+                "repo": repo,
+                "error": f"Failed to start durable scanner workflow: {error}",
+            }, status_code=503)
         durable_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
 
     return accepted_job(

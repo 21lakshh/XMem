@@ -59,7 +59,12 @@ async def _enqueue_and_start(
     )
     should_start = created or (job.get("status") == "queued" and not job.get("workflow_id"))
     if should_start:
-        await start_job_workflow(job)
+        try:
+            await start_job_workflow(job)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            await asyncio.to_thread(store.mark_failed, job["job_id"], error)
+            raise
         job = await asyncio.to_thread(store.get, job["job_id"]) or job
     return job, created
 
