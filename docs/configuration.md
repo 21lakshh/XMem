@@ -54,6 +54,20 @@ For a no-Mongo local setup, disable analytics collection:
 ENABLE_ANALYTICS=false
 ```
 
+V2 scanner jobs keep GitHub credentials out of Temporal history by storing an
+encrypted secret and passing only a lookup reference through the workflow. Set a
+dedicated Fernet key before using private repository scans:
+
+```env
+XMEM_SECRET_ENCRYPTION_KEY=...
+```
+
+Generate one with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
 ```env
 VECTOR_STORE_PROVIDER=chroma
 CHROMA_PERSIST_DIR=.xmem/chroma

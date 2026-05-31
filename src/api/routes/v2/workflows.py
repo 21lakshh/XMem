@@ -6,7 +6,11 @@ from typing import Any, Dict, List
 try:  # pragma: no cover - fallback makes app imports independent of SDK install.
     from temporalio import workflow
     from temporalio.common import RetryPolicy
+    from temporalio.exceptions import CancelledError
 except Exception:  # pragma: no cover
+    class CancelledError(BaseException):  # type: ignore[no-redef]
+        pass
+
     class RetryPolicy:  # type: ignore[no-redef]
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -47,6 +51,10 @@ async def _execute(name: str, arg: Any, timeout_seconds: float) -> Any:
         start_to_close_timeout=_activity_timeout(timeout_seconds),
         retry_policy=ACTIVITY_RETRY,
     )
+
+
+def _is_cancelled(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "CancelledError"
 
 
 async def _mark_dead(job_id: str, exc: BaseException) -> Dict[str, Any]:
@@ -174,7 +182,11 @@ class MemoryIngestWorkflow:
 
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
+        except CancelledError:
+            raise
         except Exception as exc:
+            if _is_cancelled(exc):
+                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -193,7 +205,11 @@ class MemoryBatchIngestWorkflow:
             )
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
+        except CancelledError:
+            raise
         except Exception as exc:
+            if _is_cancelled(exc):
+                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -207,7 +223,11 @@ class MemoryScrapeWorkflow:
             result = await _execute("memory_scrape_activity", input["payload"], 60)
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
+        except CancelledError:
+            raise
         except Exception as exc:
+            if _is_cancelled(exc):
+                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -221,7 +241,11 @@ class ScannerScanWorkflow:
             result = await _execute("scanner_scan_activity", input["payload"], 1800)
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
+        except CancelledError:
+            raise
         except Exception as exc:
+            if _is_cancelled(exc):
+                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -235,7 +259,11 @@ class ScannerPhase2Workflow:
             result = await _execute("scanner_phase2_activity", input["payload"], 1800)
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
+        except CancelledError:
+            raise
         except Exception as exc:
+            if _is_cancelled(exc):
+                raise
             return await _mark_dead(job_id, exc)
 
 
