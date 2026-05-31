@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from src.api.dependencies import require_api_key
 from src.api.routes import scanner as scanner_v1
+from src.api.routes.v2.secrets import store_scanner_pat
 from src.api.routes.v2.shared import _error, _wrap, accepted_job, elapsed_ms, job_status_data, read_user_job
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse
@@ -103,7 +104,6 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
         "github_url": clone_url,
         "force_full": req.force_full,
         "remote_sha": remote_sha,
-        "pat": req.pat,
     }
     durable_job, created = await asyncio.to_thread(
         get_default_job_store().enqueue,
@@ -122,6 +122,32 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
         timeout_seconds=scanner_v1.SCANNER_DURABLE_TIMEOUT_SECONDS,
         max_attempts=2,
     )
+    temporal_payload = dict(durable_payload)
+    if req.pat:
+        try:
+            temporal_payload["github_credential_ref"] = await asyncio.to_thread(
+                store_scanner_pat,
+                durable_job["job_id"],
+                req.pat,
+            )
+            await asyncio.to_thread(
+                get_default_job_store().update_payload,
+                durable_job["job_id"],
+                temporal_payload,
+            )
+            durable_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)
+            return JSONResponse({
+                "status": "error",
+                "durable_job_id": durable_job["job_id"],
+                "org": org,
+                "repo": repo,
+                "error": f"Failed to store scanner credentials: {error}",
+            }, status_code=503)
+    elif isinstance(durable_job.get("payload"), dict) and durable_job["payload"].get("github_credential_ref"):
+        temporal_payload["github_credential_ref"] = durable_job["payload"]["github_credential_ref"]
 
     started_at = time.time()
     store.upsert_scanner_job(
@@ -144,7 +170,7 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
     should_start = created or (durable_job.get("status") == "queued" and not durable_job.get("workflow_id"))
     if should_start:
         try:
-            await start_job_workflow(durable_job, payload=durable_payload)
+            await start_job_workflow(durable_job, payload=temporal_payload)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)

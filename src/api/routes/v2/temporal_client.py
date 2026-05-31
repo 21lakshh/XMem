@@ -64,6 +64,16 @@ async def start_job_workflow(
     workflow_name = workflow_name_for_job(str(job["job_type"]))
     workflow_id = job.get("workflow_id") or f"{job['job_id']}:{new_attempt_id()}"
     client = await get_temporal_client()
+    start_options: Dict[str, Any] = {
+        "id": workflow_id,
+        "task_queue": settings.temporal_task_queue,
+    }
+    try:
+        from temporalio.common import WorkflowIDConflictPolicy
+
+        start_options["id_conflict_policy"] = WorkflowIDConflictPolicy.FAIL
+    except Exception:  # pragma: no cover - older SDKs/fallback imports.
+        logger.debug("Temporal WorkflowIDConflictPolicy is unavailable; using SDK default.")
 
     handle = await client.start_workflow(
         workflow_name,
@@ -72,8 +82,7 @@ async def start_job_workflow(
             "job_type": job["job_type"],
             "payload": payload if payload is not None else job.get("payload") or {},
         },
-        id=workflow_id,
-        task_queue=settings.temporal_task_queue,
+        **start_options,
     )
 
     run_id: Optional[str] = getattr(handle, "first_execution_run_id", None)

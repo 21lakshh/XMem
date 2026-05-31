@@ -109,6 +109,7 @@ class MemoryIngestWorkflow:
                 "temporal": None,
                 "summary": None,
                 "image": None,
+                "code": None,
             }
             await _execute(
                 "mark_job_progress_activity",
@@ -164,11 +165,12 @@ class MemoryIngestWorkflow:
                 result["image"] = image.get("result")
 
             if routes["code"]:
-                await _execute(
+                code = await _execute(
                     "memory_domain_activity",
                     {"domain": "snippet", "user_id": payload["user_id"], "queries": routes["code"]},
                     timeout,
                 )
+                result["code"] = code
 
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result

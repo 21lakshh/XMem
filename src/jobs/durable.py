@@ -232,6 +232,17 @@ class DurableJobStore:
             },
         )
 
+    def update_payload(self, job_id: str, payload: Mapping[str, Any]) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "payload": redact_payload(payload),
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
     def mark_dead_letter(self, job_id: str, error: str) -> None:
         now = utc_now()
         self.jobs.update_one(

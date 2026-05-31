@@ -153,7 +153,9 @@ async def memory_scrape_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
 @activity.defn
 async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     from src.api.routes import scanner as scanner_v1
+    from src.api.routes.v2.secrets import resolve_scanner_pat
 
+    pat = await asyncio.to_thread(resolve_scanner_pat, payload.get("github_credential_ref") or "")
     await scanner_v1._run_scan_job(
         payload["scanner_job_id"],
         payload["username"],
@@ -161,7 +163,7 @@ async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["repo"],
         payload["github_url"],
         payload.get("branch") or "main",
-        payload.get("pat") or "",
+        pat,
         bool(payload.get("force_full", True)),
     )
     job = scanner_v1._get_code_store().get_scanner_job(payload["scanner_job_id"]) or {}
