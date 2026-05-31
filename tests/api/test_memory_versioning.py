@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.api import dependencies as deps
 from src.api.routes import memory
+from src.api.routes.v2 import memory as memory_v2
 
 
 class FakeIngestPipeline:
@@ -68,8 +69,8 @@ def _build_app(monkeypatch, user=None):
     app.dependency_overrides[deps.enforce_rate_limit] = fake_rate_limit
     app.include_router(memory.scrape_router)
     app.include_router(memory.router)
-    app.include_router(memory.v2_scrape_router)
-    app.include_router(memory.v2_router)
+    app.include_router(memory_v2.scrape_router)
+    app.include_router(memory_v2.router)
     return app, ingest
 
 
@@ -105,11 +106,11 @@ def test_v2_ingest_returns_durable_job_envelope(monkeypatch):
     app, ingest = _build_app(monkeypatch)
     store = FakeJobStore()
     scheduled = []
-    monkeypatch.setattr(memory, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
-        memory,
-        "_schedule_job",
-        lambda job, handler: scheduled.append(job["job_id"]),
+        memory_v2,
+        "start_job_workflow",
+        lambda job: scheduled.append(job["job_id"]),
     )
     payload = {
         "user_query": "remember this",
@@ -155,11 +156,11 @@ def test_v2_batch_ingest_queues_scoped_items_for_local_static_key(monkeypatch):
     app, ingest = _build_app(monkeypatch, user=static_user)
     store = FakeJobStore()
     scheduled = []
-    monkeypatch.setattr(memory, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
-        memory,
-        "_schedule_job",
-        lambda job, handler: scheduled.append(job["job_id"]),
+        memory_v2,
+        "start_job_workflow",
+        lambda job: scheduled.append(job["job_id"]),
     )
     payload = {
         "items": [

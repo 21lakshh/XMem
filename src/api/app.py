@@ -37,11 +37,13 @@ from src.api.routes.enterprise import router as enterprise_router
 from src.api.routes.health import router as health_router
 from src.api.routes.memory import router as memory_router
 from src.api.routes.memory import scrape_router as memory_scrape_router
-from src.api.routes.memory import v2_router as memory_v2_router
-from src.api.routes.memory import v2_scrape_router as memory_v2_scrape_router
 from src.api.routes.memory_graph import router as memory_graph_router
 from src.api.routes.scanner import router as scanner_router
 from src.api.routes.telemetry import router as telemetry_router
+from src.api.routes.v2.jobs import router as jobs_v2_router
+from src.api.routes.v2.memory import router as memory_v2_router
+from src.api.routes.v2.memory import scrape_router as memory_v2_scrape_router
+from src.api.routes.v2.scanner import router as scanner_v2_router
 from src.api.schemas import APIResponse, StatusEnum
 from src.config import settings
 
@@ -225,6 +227,8 @@ def create_app() -> FastAPI:
     app.include_router(memory_graph_router)
     app.include_router(code_router)
     app.include_router(scanner_router)
+    app.include_router(scanner_v2_router)
+    app.include_router(jobs_v2_router)
     app.include_router(auth_router)
     app.include_router(api_keys_router)
     app.include_router(connectors_router)

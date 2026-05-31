@@ -25,8 +25,9 @@ RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 DEAD_LETTER = "dead_letter"
+CANCELLED = "cancelled"
 
-TERMINAL_STATUSES = {SUCCEEDED, DEAD_LETTER}
+TERMINAL_STATUSES = {SUCCEEDED, DEAD_LETTER, CANCELLED}
 REDACTED_KEYS = {
     "authorization",
     "cookie",
@@ -126,6 +127,7 @@ class DurableJobStore:
         self.jobs.create_index([("job_type", 1), ("idempotency_key", 1)], unique=True)
         self.jobs.create_index([("user_id", 1), ("updated_at", -1)])
         self.jobs.create_index([("status", 1), ("updated_at", 1)])
+        self.jobs.create_index([("workflow_id", 1)])
 
     def enqueue(
         self,
@@ -158,6 +160,10 @@ class DurableJobStore:
             "started_at": None,
             "completed_at": None,
             "dead_lettered_at": None,
+            "cancelled_at": None,
+            "workflow_id": None,
+            "run_id": None,
+            "progress": None,
         }
         try:
             self.jobs.insert_one(doc)
@@ -177,6 +183,95 @@ class DurableJobStore:
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self.jobs.find_one({"job_id": job_id})
+
+
+    def record_workflow(
+        self,
+        job_id: str,
+        workflow_id: str,
+        run_id: Optional[str] = None,
+    ) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
+    def mark_running(self, job_id: str) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "status": RUNNING,
+                    "started_at": utc_now(),
+                    "updated_at": utc_now(),
+                    "error": None,
+                    "error_state": None,
+                },
+                "$inc": {"retry_count": 1},
+            },
+        )
+
+    def update_progress(self, job_id: str, progress: Mapping[str, Any]) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "progress": _normalise(progress),
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
+    def mark_dead_letter(self, job_id: str, error: str) -> None:
+        now = utc_now()
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "status": DEAD_LETTER,
+                    "error": error,
+                    "error_state": {
+                        "message": error,
+                        "failed_at": now,
+                    },
+                    "dead_lettered_at": now,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            },
+        )
+
+    def mark_cancelled(self, job_id: str) -> None:
+        now = utc_now()
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "status": CANCELLED,
+                    "cancelled_at": now,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            },
+        )
+
+    def list_by_status(
+        self,
+        status: str,
+        user_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[Dict[str, Any]]:
+        query: Dict[str, Any] = {"status": status}
+        if user_id:
+            query["user_id"] = user_id
+        cursor = self.jobs.find(query).sort("updated_at", -1).limit(limit)
+        return list(cursor)
 
     def claim_for_run(self, job_id: str) -> bool:
         result = self.jobs.update_one(
@@ -234,10 +329,22 @@ class DurableJobStore:
         self.jobs.update_one({"job_id": job_id}, {"$set": update})
         return status
 
-    def reset_for_retry(self, job_id: str) -> None:
+    def reset_for_retry(self, job_id: str, clear_workflow: bool = False) -> None:
+        update = {
+            "status": QUEUED,
+            "updated_at": utc_now(),
+            "error": None,
+            "error_state": None,
+            "completed_at": None,
+            "dead_lettered_at": None,
+            "cancelled_at": None,
+        }
+        if clear_workflow:
+            update["workflow_id"] = None
+            update["run_id"] = None
         self.jobs.update_one(
             {"job_id": job_id},
-            {"$set": {"status": QUEUED, "updated_at": utc_now()}},
+            {"$set": update},
         )
 
 

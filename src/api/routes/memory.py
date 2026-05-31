@@ -49,12 +49,7 @@ import re
 from playwright.sync_api import sync_playwright
 
 from src.config import settings
-from src.jobs.durable import (
-    QUEUED,
-    get_default_job_store,
-    run_job,
-    serialize_job,
-)
+from src.jobs.durable import serialize_job
 
 logger = logging.getLogger("xmem.api.routes.memory")
 
@@ -69,18 +64,6 @@ router = APIRouter(
 
 scrape_router = APIRouter(
     prefix="/v1/memory",
-    tags=["memory"],
-    dependencies=[Depends(enforce_rate_limit)],
-)
-
-v2_router = APIRouter(
-    prefix="/v2/memory",
-    tags=["memory"],
-    dependencies=[Depends(require_ready), Depends(enforce_rate_limit)],
-)
-
-v2_scrape_router = APIRouter(
-    prefix="/v2/memory",
     tags=["memory"],
     dependencies=[Depends(enforce_rate_limit)],
 )
@@ -714,56 +697,6 @@ async def ingest_memory(req: IngestRequest, request: Request, user: dict = Depen
         return _error(request, str(exc), 500, elapsed)
 
 
-# POST /v2/memory/ingest
-@v2_router.post(
-    "/ingest",
-    response_model=APIResponse,
-    summary="Start an async durable memory ingest job",
-)
-async def ingest_memory_v2(req: IngestRequest, request: Request, user: dict = Depends(require_api_key)):
-    start = time.perf_counter()
-    user_id = _current_user_id(user, req.user_id)
-    job_user_id = _current_user_id(user)
-    payload = req.model_dump()
-    payload["user_id"] = user_id
-
-    try:
-        store = get_default_job_store()
-        job, created = await asyncio.to_thread(
-            store.enqueue,
-            job_type="memory_ingest",
-            payload=payload,
-            idempotency_fields={
-                "user_id": user_id,
-                "user_query": req.user_query,
-                "agent_response": req.agent_response or "",
-                "session_datetime": req.session_datetime,
-                "image_url": req.image_url,
-                "effort_level": req.effort_level,
-            },
-            user_id=job_user_id,
-            timeout_seconds=float(settings.memory_ingest_timeout_seconds),
-            max_attempts=3,
-        )
-        _schedule_job(
-            job,
-            lambda: _run_ingest_payload(payload, user_id),
-        )
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _job_accepted(
-            request,
-            job,
-            created,
-            f"/v2/memory/ingest/{job['job_id']}/status",
-            elapsed,
-        )
-
-    except Exception as exc:
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        logger.exception("Ingest enqueue failed for user=%s", user_id)
-        return _error(request, str(exc), 500, elapsed)
-
-
 def _safe_classifications(result: Dict[str, Any]) -> list:
     cr = result.get("classification_result")
     if cr and getattr(cr, "classifications", None):
@@ -780,34 +713,6 @@ async def _read_user_job(job_id: str, user_id: str) -> Dict[str, Any] | None:
     return job
 
 
-@v2_router.get(
-    "/ingest/{job_id}/status",
-    response_model=APIResponse,
-    summary="Poll an async memory ingest job",
-)
-async def ingest_job_status(job_id: str, request: Request, user: dict = Depends(require_api_key)):
-    start = time.perf_counter()
-    job = await _read_user_job(job_id, _current_user_id(user))
-    if not job:
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _error(request, "Job not found.", 404, elapsed)
-    elapsed = round((time.perf_counter() - start) * 1000, 2)
-    return _wrap(request, _job_status_data(job), elapsed)
-
-
-@v2_router.get(
-    "/jobs/{job_id}/status",
-    response_model=APIResponse,
-    summary="Poll an async memory job",
-)
-async def memory_job_status(job_id: str, request: Request, user: dict = Depends(require_api_key)):
-    start = time.perf_counter()
-    job = await _read_user_job(job_id, _current_user_id(user))
-    if not job:
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _error(request, "Job not found.", 404, elapsed)
-    elapsed = round((time.perf_counter() - start) * 1000, 2)
-    return _wrap(request, _job_status_data(job), elapsed)
 
 
 # POST /v1/memory/batch-ingest
@@ -837,55 +742,6 @@ async def batch_ingest_memory(req: BatchIngestRequest, request: Request, user: d
     except Exception as exc:
         elapsed = round((time.perf_counter() - start) * 1000, 2)
         logger.exception("Batch ingest failed for user=%s", user_id)
-        return _error(request, str(exc), 500, elapsed)
-
-
-# POST /v2/memory/batch-ingest
-@v2_router.post(
-    "/batch-ingest",
-    response_model=APIResponse,
-    summary="Start an async durable batch memory ingest job",
-)
-async def batch_ingest_memory_v2(req: BatchIngestRequest, request: Request, user: dict = Depends(require_api_key)):
-    start = time.perf_counter()
-    user_id = _current_user_id(user)
-    payload = req.model_dump()
-    payload["user_id"] = user_id
-    payload["items"] = [_scoped_ingest_payload(user, item) for item in req.items]
-
-    try:
-        store = get_default_job_store()
-        job, created = await asyncio.to_thread(
-            store.enqueue,
-            job_type="memory_batch_ingest",
-            payload=payload,
-            idempotency_fields={
-                "user_id": user_id,
-                "items": payload["items"],
-            },
-            user_id=user_id,
-            timeout_seconds=max(
-                float(settings.memory_ingest_timeout_seconds),
-                min(len(req.items) * float(settings.memory_ingest_timeout_seconds), 3600.0),
-            ),
-            max_attempts=3,
-        )
-        _schedule_job(
-            job,
-            lambda: _run_batch_ingest_payload(payload),
-        )
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _job_accepted(
-            request,
-            job,
-            created,
-            f"/v2/memory/jobs/{job['job_id']}/status",
-            elapsed,
-        )
-
-    except Exception as exc:
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        logger.exception("Batch ingest enqueue failed for user=%s", user_id)
         return _error(request, str(exc), 500, elapsed)
 
 
@@ -1040,58 +896,6 @@ async def scrape_chat_link(req: ScrapeRequest, request: Request):
         elapsed = round((time.perf_counter() - start) * 1000, 2)
         logger.exception("Scrape failed for url=%s", url)
         return _error(request, str(exc) or repr(exc), 500, elapsed)
-
-
-# POST /v2/memory/scrape
-@v2_scrape_router.post(
-    "/scrape",
-    response_model=APIResponse,
-    summary="Start an async durable scrape job",
-)
-async def scrape_chat_link_v2(req: ScrapeRequest, request: Request):
-    start = time.perf_counter()
-    payload = req.model_dump()
-
-    try:
-        store = get_default_job_store()
-        job, created = await asyncio.to_thread(
-            store.enqueue,
-            job_type="memory_scrape",
-            payload=payload,
-            idempotency_fields={"url": req.url},
-            user_id="anonymous",
-            timeout_seconds=60.0,
-            max_attempts=2,
-        )
-        _schedule_job(job, lambda: _run_scrape_payload(payload))
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _job_accepted(
-            request,
-            job,
-            created,
-            f"/v2/memory/scrape/{job['job_id']}/status",
-            elapsed,
-        )
-
-    except Exception as exc:
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        logger.exception("Scrape enqueue failed for url=%s", req.url)
-        return _error(request, str(exc) or repr(exc), 500, elapsed)
-
-
-@v2_scrape_router.get(
-    "/scrape/{job_id}/status",
-    response_model=APIResponse,
-    summary="Poll an async scrape job",
-)
-async def scrape_job_status(job_id: str, request: Request):
-    start = time.perf_counter()
-    job = await asyncio.to_thread(get_default_job_store().get, job_id)
-    if not job or job.get("user_id") != "anonymous":
-        elapsed = round((time.perf_counter() - start) * 1000, 2)
-        return _error(request, "Job not found.", 404, elapsed)
-    elapsed = round((time.perf_counter() - start) * 1000, 2)
-    return _wrap(request, _job_status_data(job), elapsed)
 
 
 
