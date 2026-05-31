@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -9,6 +10,7 @@ from src.jobs.durable import get_default_job_store, new_attempt_id
 logger = logging.getLogger("xmem.api.routes.v2.temporal_client")
 
 _temporal_client = None
+_temporal_client_lock = asyncio.Lock()
 
 
 WORKFLOW_BY_JOB_TYPE = {
@@ -37,10 +39,12 @@ async def get_temporal_client():
         ) from exc
 
     if _temporal_client is None:
-        _temporal_client = await Client.connect(
-            settings.temporal_address,
-            namespace=settings.temporal_namespace,
-        )
+        async with _temporal_client_lock:
+            if _temporal_client is None:
+                _temporal_client = await Client.connect(
+                    settings.temporal_address,
+                    namespace=settings.temporal_namespace,
+                )
     return _temporal_client
 
 
@@ -51,7 +55,10 @@ def workflow_name_for_job(job_type: str) -> str:
         raise ValueError(f"No v2 Temporal workflow is registered for {job_type!r}.") from exc
 
 
-async def start_job_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
+async def start_job_workflow(
+    job: Dict[str, Any],
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Start the Temporal workflow that owns this durable job."""
 
     workflow_name = workflow_name_for_job(str(job["job_type"]))
@@ -63,7 +70,7 @@ async def start_job_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
         {
             "job_id": job["job_id"],
             "job_type": job["job_type"],
-            "payload": job.get("payload") or {},
+            "payload": payload if payload is not None else job.get("payload") or {},
         },
         id=workflow_id,
         task_queue=settings.temporal_task_queue,

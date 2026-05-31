@@ -144,7 +144,7 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
     should_start = created or (durable_job.get("status") == "queued" and not durable_job.get("workflow_id"))
     if should_start:
         try:
-            await start_job_workflow(durable_job)
+            await start_job_workflow(durable_job, payload=durable_payload)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)
