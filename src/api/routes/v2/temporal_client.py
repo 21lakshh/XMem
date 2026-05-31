@@ -98,8 +98,6 @@ async def _record_temporal_ids(
     workflow_id: str,
     run_id: Optional[str],
 ) -> None:
-    import asyncio
-
     await asyncio.to_thread(
         get_default_job_store().record_workflow,
         job_id,
