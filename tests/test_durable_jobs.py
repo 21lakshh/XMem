@@ -62,7 +62,8 @@ class FakeJobStore:
             if self.job["status"] != QUEUED:
                 return False
             self.job["status"] = RUNNING
-            self.job["retry_count"] = self.job.get("retry_count", 0) + 1
+            self.job["attempt_count"] = self.job.get("attempt_count", 0) + 1
+            self.job["retry_count"] = max(self.job["attempt_count"] - 1, 0)
             return True
 
     def mark_succeeded(self, job_id, result=None):
@@ -72,17 +73,20 @@ class FakeJobStore:
 
     def mark_failed(self, job_id, error):
         assert job_id == self.job["job_id"]
+        attempt_count = self.job.get("attempt_count", 0)
         status = (
             DEAD_LETTER
-            if self.job.get("retry_count", 0) >= self.job.get("max_attempts", 1)
+            if attempt_count >= self.job.get("max_attempts", 1)
             else FAILED
         )
         self.job["status"] = status
+        self.job["retry_count"] = max(attempt_count - 1, 0)
         self.job["error"] = error
         self.job["error_state"] = {
             "message": error,
             "failed_at": utc_now(),
-            "attempt": self.job.get("retry_count", 0),
+            "attempt": attempt_count,
+            "retry_count": self.job["retry_count"],
         }
         return status
 
@@ -97,6 +101,7 @@ async def test_run_job_retries_then_succeeds():
         "job_id": "job-1",
         "status": QUEUED,
         "retry_count": 0,
+        "attempt_count": 0,
         "max_attempts": 2,
         "timeout_seconds": 1,
     })
@@ -113,7 +118,8 @@ async def test_run_job_retries_then_succeeds():
 
     assert attempts == 2
     assert store.job["status"] == SUCCEEDED
-    assert store.job["retry_count"] == 2
+    assert store.job["attempt_count"] == 2
+    assert store.job["retry_count"] == 1
     assert store.job["result"]["ok"] is True
 
 
@@ -123,6 +129,7 @@ async def test_run_job_dead_letters_after_max_attempts():
         "job_id": "job-2",
         "status": QUEUED,
         "retry_count": 0,
+        "attempt_count": 0,
         "max_attempts": 1,
         "timeout_seconds": 1,
     })
@@ -133,7 +140,8 @@ async def test_run_job_dead_letters_after_max_attempts():
     await run_job(store, "job-2", handler, retry_base_seconds=0)
 
     assert store.job["status"] == DEAD_LETTER
-    assert store.job["retry_count"] == 1
+    assert store.job["attempt_count"] == 1
+    assert store.job["retry_count"] == 0
     assert store.job["error"] == "permanent failure"
 
 
@@ -143,6 +151,7 @@ async def test_duplicate_runners_only_execute_handler_once():
         "job_id": "job-3",
         "status": QUEUED,
         "retry_count": 0,
+        "attempt_count": 0,
         "max_attempts": 1,
         "timeout_seconds": 1,
     })
@@ -167,4 +176,5 @@ async def test_duplicate_runners_only_execute_handler_once():
 
     assert attempts == 1
     assert store.job["status"] == SUCCEEDED
-    assert store.job["retry_count"] == 1
+    assert store.job["attempt_count"] == 1
+    assert store.job["retry_count"] == 0

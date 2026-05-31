@@ -39,6 +39,7 @@ class FakeJobStore:
             "timeout_seconds": timeout_seconds,
             "max_attempts": max_attempts,
             "retry_count": 0,
+            "attempt_count": 0,
         }
         self.jobs[job["job_id"]] = job
         return job, True
@@ -106,11 +107,14 @@ def test_v2_ingest_returns_durable_job_envelope(monkeypatch):
     app, ingest = _build_app(monkeypatch)
     store = FakeJobStore()
     scheduled = []
+    async def fake_start_job_workflow(job):
+        scheduled.append(job["job_id"])
+
     monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
         memory_v2,
         "start_job_workflow",
-        lambda job: scheduled.append(job["job_id"]),
+        fake_start_job_workflow,
     )
     payload = {
         "user_query": "remember this",
@@ -156,11 +160,14 @@ def test_v2_batch_ingest_queues_scoped_items_for_local_static_key(monkeypatch):
     app, ingest = _build_app(monkeypatch, user=static_user)
     store = FakeJobStore()
     scheduled = []
+    async def fake_start_job_workflow(job):
+        scheduled.append(job["job_id"])
+
     monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
         memory_v2,
         "start_job_workflow",
-        lambda job: scheduled.append(job["job_id"]),
+        fake_start_job_workflow,
     )
     payload = {
         "items": [

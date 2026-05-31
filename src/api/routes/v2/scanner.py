@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -19,6 +18,12 @@ from src.jobs.durable import get_default_job_store
 router = APIRouter(prefix="/v2/scanner", tags=["scanner-v2"])
 
 
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @router.post("/scan", summary="Start a durable v2 GitHub repository scan")
 async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dict = Depends(require_api_key)):
     start = time.perf_counter()
@@ -34,7 +39,7 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
     if existing and existing.get("phase1_status") == "running":
         last_updated = existing.get("updated_at")
         since_last_update = (
-            datetime.now(timezone.utc) - last_updated
+            datetime.now(timezone.utc) - _as_aware_utc(last_updated)
         ).total_seconds() if last_updated else 0
         if last_updated and since_last_update < 30:
             return JSONResponse({
@@ -138,9 +143,7 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
 
     should_start = created or (durable_job.get("status") == "queued" and not durable_job.get("workflow_id"))
     if should_start:
-        started = start_job_workflow(durable_job)
-        if inspect.isawaitable(started):
-            await started
+        await start_job_workflow(durable_job)
         durable_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
 
     return accepted_job(

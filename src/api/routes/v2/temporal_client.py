@@ -8,6 +8,8 @@ from src.jobs.durable import get_default_job_store, new_attempt_id
 
 logger = logging.getLogger("xmem.api.routes.v2.temporal_client")
 
+_temporal_client = None
+
 
 WORKFLOW_BY_JOB_TYPE = {
     "memory_ingest": "MemoryIngestWorkflow",
@@ -25,6 +27,8 @@ class TemporalUnavailable(RuntimeError):
 
 
 async def get_temporal_client():
+    global _temporal_client
+
     try:
         from temporalio.client import Client
     except Exception as exc:  # pragma: no cover - depends on optional SDK import
@@ -32,10 +36,12 @@ async def get_temporal_client():
             "temporalio is not installed. Install project dependencies first."
         ) from exc
 
-    return await Client.connect(
-        settings.temporal_address,
-        namespace=settings.temporal_namespace,
-    )
+    if _temporal_client is None:
+        _temporal_client = await Client.connect(
+            settings.temporal_address,
+            namespace=settings.temporal_namespace,
+        )
+    return _temporal_client
 
 
 def workflow_name_for_job(job_type: str) -> str:

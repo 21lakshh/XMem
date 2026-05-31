@@ -150,6 +150,7 @@ class DurableJobStore:
             "payload": redact_payload(payload),
             "status": QUEUED,
             "retry_count": 0,
+            "attempt_count": 0,
             "max_attempts": max_attempts,
             "timeout_seconds": timeout_seconds,
             "error": None,
@@ -203,17 +204,20 @@ class DurableJobStore:
         )
 
     def mark_running(self, job_id: str) -> None:
+        job = self.get(job_id) or {}
+        attempt_count = int(job.get("attempt_count") or 0) + 1
         self.jobs.update_one(
             {"job_id": job_id},
             {
                 "$set": {
                     "status": RUNNING,
+                    "attempt_count": attempt_count,
+                    "retry_count": max(attempt_count - 1, 0),
                     "started_at": utc_now(),
                     "updated_at": utc_now(),
                     "error": None,
                     "error_state": None,
                 },
-                "$inc": {"retry_count": 1},
             },
         )
 
@@ -274,17 +278,20 @@ class DurableJobStore:
         return list(cursor)
 
     def claim_for_run(self, job_id: str) -> bool:
+        job = self.get(job_id) or {}
+        attempt_count = int(job.get("attempt_count") or 0) + 1
         result = self.jobs.update_one(
             {"job_id": job_id, "status": QUEUED},
             {
                 "$set": {
                     "status": RUNNING,
+                    "attempt_count": attempt_count,
+                    "retry_count": max(attempt_count - 1, 0),
                     "started_at": utc_now(),
                     "updated_at": utc_now(),
                     "error": None,
                     "error_state": None,
                 },
-                "$inc": {"retry_count": 1},
             },
         )
         return result.modified_count == 1
@@ -310,16 +317,19 @@ class DurableJobStore:
 
     def mark_failed(self, job_id: str, error: str) -> str:
         job = self.get(job_id) or {}
-        retry_count = int(job.get("retry_count") or 0)
+        attempt_count = int(job.get("attempt_count") or 0)
+        retry_count = max(attempt_count - 1, 0)
         max_attempts = int(job.get("max_attempts") or 1)
-        status = DEAD_LETTER if retry_count >= max_attempts else FAILED
+        status = DEAD_LETTER if attempt_count >= max_attempts else FAILED
         update: Dict[str, Any] = {
             "status": status,
+            "retry_count": retry_count,
             "error": error,
             "error_state": {
                 "message": error,
                 "failed_at": utc_now(),
-                "attempt": retry_count,
+                "attempt": attempt_count,
+                "retry_count": retry_count,
             },
             "updated_at": utc_now(),
         }
@@ -394,8 +404,8 @@ async def run_job(
                 logger.exception("Durable job %s dead-lettered: %s", job_id, error)
                 return
             job = await asyncio.to_thread(store.get, job_id) or {}
-            retry_count = int(job.get("retry_count") or 1)
-            delay = min(retry_base_seconds * (2 ** max(retry_count - 1, 0)), 30.0)
+            attempt_count = int(job.get("attempt_count") or 1)
+            delay = min(retry_base_seconds * (2 ** max(attempt_count - 1, 0)), 30.0)
             logger.warning(
                 "Durable job %s failed; retrying in %.1fs: %s",
                 job_id,

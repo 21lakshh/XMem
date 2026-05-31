@@ -17,6 +17,7 @@ def job_status_data(job: Dict[str, Any]) -> Dict[str, Any]:
         "job_type": public.get("job_type"),
         "status": public.get("status"),
         "retry_count": public.get("retry_count", 0),
+        "attempt_count": public.get("attempt_count", 0),
         "max_attempts": public.get("max_attempts", 0),
         "timeout_seconds": public.get("timeout_seconds"),
         "workflow_id": public.get("workflow_id"),

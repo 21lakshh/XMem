@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from typing import Any, Dict
 
@@ -60,9 +59,7 @@ async def _enqueue_and_start(
     )
     should_start = created or (job.get("status") == "queued" and not job.get("workflow_id"))
     if should_start:
-        started = start_job_workflow(job)
-        if inspect.isawaitable(started):
-            await started
+        await start_job_workflow(job)
         job = await asyncio.to_thread(store.get, job["job_id"]) or job
     return job, created
 

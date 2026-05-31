@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -58,9 +57,7 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
 
     await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
-    started = start_job_workflow(job)
-    if inspect.isawaitable(started):
-        await started
+    await start_job_workflow(job)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
     return _wrap(request, job_status_data(job), elapsed_ms(start))
 
