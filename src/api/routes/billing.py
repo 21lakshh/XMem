@@ -341,6 +341,9 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
         elif package_id in billing_config.TOP_UP_PACKS:
             logger.warning("Razorpay top-up webhook missing order id: %s", event_name)
             raise HTTPException(status_code=400, detail="Webhook order id is required for credit grant")
+        else:
+            logger.warning("Razorpay webhook has unknown grant package id: %s", package_id)
+            raise HTTPException(status_code=400, detail="Webhook package id is not configured for credit grant")
 
     first_seen = await asyncio.to_thread(
         service.store.mark_payment_event,

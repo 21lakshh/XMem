@@ -141,9 +141,15 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
     except InsufficientCredits as exc:
         return _error(request, str(exc), 402, elapsed_ms(start))
     except Exception as exc:
+        release_error = None
         if billing_reservation_created and billing_account_id:
-            await asyncio.to_thread(release_job_reservation, billing_account_id, job_id)
+            try:
+                await asyncio.to_thread(release_job_reservation, billing_account_id, job_id)
+            except Exception as release_exc:
+                release_error = str(release_exc) or release_exc.__class__.__name__
         error = str(exc) or exc.__class__.__name__
+        if release_error:
+            error = f"{error}; billing reservation release failed: {release_error}"
         await asyncio.to_thread(get_default_job_store().mark_failed, job_id, error)
         return _error(request, f"Retry failed to start workflow: {error}", 503, elapsed_ms(start))
     job = await asyncio.to_thread(get_default_job_store().get, job_id)

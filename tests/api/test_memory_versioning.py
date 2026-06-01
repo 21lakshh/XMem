@@ -303,6 +303,56 @@ def test_v2_retry_payload_update_failure_releases_fresh_billing_reservation(monk
     assert store.jobs["job-1"]["error"] == "payload write failed"
 
 
+def test_v2_retry_release_failure_still_marks_job_failed(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "failed",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 1,
+        "attempt_count": 1,
+        "workflow_id": "old-workflow",
+    }
+
+    class FakeEstimate:
+        reserved_credits = 100
+
+        def model_dump(self):
+            return {"reserved_credits": self.reserved_credits}
+
+    class FakeBillingService:
+        def estimate_required_credits(self, job_type, payload):
+            return FakeEstimate()
+
+        def reserve_credits(self, account_id, job_id, estimated_credits):
+            return SimpleNamespace(reservation_id="reservation-1", created=True)
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    def fail_release(account_id, job_id):
+        raise RuntimeError("mongo unavailable")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "get_default_billing_service", lambda: FakeBillingService())
+    monkeypatch.setattr(jobs_v2, "release_job_reservation", fail_release)
+    monkeypatch.setattr(jobs_v2, "start_job_workflow", fake_start_job_workflow)
+
+    response = TestClient(app).post("/v2/jobs/job-1/retry")
+
+    assert response.status_code == 503
+    assert store.jobs["job-1"]["status"] == "failed"
+    assert store.jobs["job-1"]["error"] == (
+        "temporal unavailable; billing reservation release failed: mongo unavailable"
+    )
+
+
 def test_v2_retry_start_failure_keeps_reused_billing_reservation(monkeypatch):
     app, _ = _build_app(monkeypatch)
     store = FakeJobStore()
