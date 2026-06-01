@@ -17,7 +17,12 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import cancel_job_workflow, start_job_workflow
 from src.api.schemas import APIResponse
-from src.billing import InsufficientCredits, get_default_billing_service, release_job_billing
+from src.billing import (
+    InsufficientCredits,
+    get_default_billing_service,
+    release_job_billing,
+    release_job_reservation,
+)
 from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
 
 router = APIRouter(
@@ -115,6 +120,7 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
 
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
     billing_account_id = payload.get("billing_account_id")
+    billing_reservation_created = False
     if billing_account_id:
         billing_service = get_default_billing_service()
         try:
@@ -127,15 +133,18 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
             )
             payload["billing_reservation_id"] = reservation.reservation_id
             payload["billing_estimate"] = estimate.model_dump()
+            billing_reservation_created = reservation.created
             await asyncio.to_thread(get_default_job_store().update_payload, job_id, payload)
         except InsufficientCredits as exc:
             return _error(request, str(exc), 402, elapsed_ms(start))
 
-    await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
-    job = await asyncio.to_thread(get_default_job_store().get, job_id)
     try:
+        await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
+        job = await asyncio.to_thread(get_default_job_store().get, job_id)
         await start_job_workflow(job)
     except Exception as exc:
+        if billing_reservation_created and billing_account_id:
+            await asyncio.to_thread(release_job_reservation, billing_account_id, job_id)
         error = str(exc) or exc.__class__.__name__
         await asyncio.to_thread(get_default_job_store().mark_failed, job_id, error)
         return _error(request, f"Retry failed to start workflow: {error}", 503, elapsed_ms(start))
