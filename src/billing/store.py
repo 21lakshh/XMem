@@ -22,7 +22,6 @@ _memory_reservations: dict[str, dict[str, Any]] = {}
 _memory_usage_events: list[dict[str, Any]] = []
 _memory_checkouts: dict[str, dict[str, Any]] = {}
 _memory_payment_events: dict[str, dict[str, Any]] = {}
-_memory_payments = _memory_checkouts
 
 
 class BillingStoreError(RuntimeError):
