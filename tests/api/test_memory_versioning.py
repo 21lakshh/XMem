@@ -353,7 +353,7 @@ def test_v2_retry_start_failure_keeps_reused_billing_reservation(monkeypatch):
     assert store.jobs["job-1"]["status"] == "failed"
 
 
-def test_v2_cancel_mark_failure_releases_billing_after_signal(monkeypatch):
+def test_v2_cancel_mark_failure_keeps_billing_reserved_after_signal(monkeypatch):
     app, _ = _build_app(monkeypatch)
     store = FakeJobStore()
     store.jobs["job-1"] = {
@@ -391,7 +391,8 @@ def test_v2_cancel_mark_failure_releases_billing_after_signal(monkeypatch):
 
     assert response.status_code == 503
     assert cancelled == ["job-1"]
-    assert released == [("job-1", "cancel_signal_sent")]
+    assert released == []
+    assert store.jobs["job-1"]["status"] == "running"
 
 
 def test_v1_batch_ingest_scopes_each_item_for_local_static_key(monkeypatch):

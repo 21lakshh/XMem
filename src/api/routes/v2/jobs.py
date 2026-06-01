@@ -169,8 +169,7 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             if cancel_signal_sent:
-                await asyncio.to_thread(release_job_billing, job, "cancel_signal_sent")
-                return _error(request, f"Cancel failed after reaching workflow: {error}", 503, elapsed_ms(start))
+                return _error(request, f"Cancel reached workflow but failed to persist status: {error}", 503, elapsed_ms(start))
             return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
         job = await asyncio.to_thread(get_default_job_store().get, job_id)
     await asyncio.to_thread(release_job_billing, job, "cancelled")
