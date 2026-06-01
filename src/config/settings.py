@@ -144,6 +144,18 @@ class Settings(BaseSettings):
         default=120.0,
         description="Overall memory ingest timeout in seconds",
     )
+    temporal_address: str = Field(
+        default="localhost:7233",
+        description="Temporal frontend address for durable v2 workflows",
+    )
+    temporal_namespace: str = Field(
+        default="default",
+        description="Temporal namespace for durable v2 workflows",
+    )
+    temporal_task_queue: str = Field(
+        default="xmem-v2",
+        description="Temporal task queue used by the XMem v2 worker",
+    )
     fallback_order: List[str] = Field(
         default=["openrouter", "gemini", "claude", "openai"],
         description="Order of LLM providers to try on failure"

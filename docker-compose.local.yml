@@ -59,6 +59,33 @@ services:
       timeout: 5s
       retries: 12
 
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    container_name: xmem-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: xmem
+      POSTGRES_PWD: xmem
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: xmem-temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "18088:8080"
+
 volumes:
   postgres_data:
   mongo_data:

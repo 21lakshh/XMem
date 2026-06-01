@@ -25,8 +25,9 @@ RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 DEAD_LETTER = "dead_letter"
+CANCELLED = "cancelled"
 
-TERMINAL_STATUSES = {SUCCEEDED, DEAD_LETTER}
+TERMINAL_STATUSES = {SUCCEEDED, DEAD_LETTER, CANCELLED}
 REDACTED_KEYS = {
     "authorization",
     "cookie",
@@ -126,6 +127,13 @@ class DurableJobStore:
         self.jobs.create_index([("job_type", 1), ("idempotency_key", 1)], unique=True)
         self.jobs.create_index([("user_id", 1), ("updated_at", -1)])
         self.jobs.create_index([("status", 1), ("updated_at", 1)])
+        self.jobs.create_index([("workflow_id", 1)])
+        secrets = self.get_collection("durable_job_secrets")
+        secrets.create_index([("secret_ref", 1)], unique=True)
+        secrets.create_index([("job_id", 1)])
+
+    def get_collection(self, name: str):
+        return self._db[name]
 
     def enqueue(
         self,
@@ -148,6 +156,7 @@ class DurableJobStore:
             "payload": redact_payload(payload),
             "status": QUEUED,
             "retry_count": 0,
+            "attempt_count": 0,
             "max_attempts": max_attempts,
             "timeout_seconds": timeout_seconds,
             "error": None,
@@ -158,6 +167,10 @@ class DurableJobStore:
             "started_at": None,
             "completed_at": None,
             "dead_lettered_at": None,
+            "cancelled_at": None,
+            "workflow_id": None,
+            "run_id": None,
+            "progress": None,
         }
         try:
             self.jobs.insert_one(doc)
@@ -178,18 +191,147 @@ class DurableJobStore:
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self.jobs.find_one({"job_id": job_id})
 
+
+    def record_workflow(
+        self,
+        job_id: str,
+        workflow_id: str,
+        run_id: Optional[str] = None,
+    ) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
+    def reserve_workflow_start(self, job_id: str, workflow_id: str) -> bool:
+        result = self.jobs.update_one(
+            {"job_id": job_id, "status": QUEUED, "workflow_id": None},
+            {
+                "$set": {
+                    "workflow_id": workflow_id,
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+        return getattr(result, "modified_count", 0) == 1
+
+    def mark_running(self, job_id: str) -> None:
+        now = utc_now()
+        job = self.jobs.find_one_and_update(
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
+            {
+                "$inc": {"attempt_count": 1},
+                "$set": {
+                    "status": RUNNING,
+                    "started_at": now,
+                    "updated_at": now,
+                    "error": None,
+                    "error_state": None,
+                },
+            },
+            return_document=True,
+        )
+        if job is None:
+            return
+
+        attempt_count = int(job.get("attempt_count") or 0)
+        self.jobs.update_one(
+            {
+                "job_id": job_id,
+                "attempt_count": attempt_count,
+                "status": {"$nin": list(TERMINAL_STATUSES)},
+            },
+            {"$set": {"retry_count": max(attempt_count - 1, 0)}},
+        )
+
+    def update_progress(self, job_id: str, progress: Mapping[str, Any]) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "progress": _normalise(progress),
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
+    def update_payload(self, job_id: str, payload: Mapping[str, Any]) -> None:
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "payload": redact_payload(payload),
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+
+    def mark_dead_letter(self, job_id: str, error: str) -> None:
+        now = utc_now()
+        self.jobs.update_one(
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
+            {
+                "$set": {
+                    "status": DEAD_LETTER,
+                    "error": error,
+                    "error_state": {
+                        "message": error,
+                        "failed_at": now,
+                    },
+                    "dead_lettered_at": now,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            },
+        )
+
+    def mark_cancelled(self, job_id: str) -> None:
+        now = utc_now()
+        self.jobs.update_one(
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
+            {
+                "$set": {
+                    "status": CANCELLED,
+                    "cancelled_at": now,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            },
+        )
+
+    def list_by_status(
+        self,
+        status: str,
+        user_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[Dict[str, Any]]:
+        query: Dict[str, Any] = {"status": status}
+        if user_id:
+            query["user_id"] = user_id
+        cursor = self.jobs.find(query).sort("updated_at", -1).limit(limit)
+        return list(cursor)
+
     def claim_for_run(self, job_id: str) -> bool:
+        job = self.get(job_id) or {}
+        attempt_count = int(job.get("attempt_count") or 0) + 1
         result = self.jobs.update_one(
             {"job_id": job_id, "status": QUEUED},
             {
                 "$set": {
                     "status": RUNNING,
+                    "attempt_count": attempt_count,
+                    "retry_count": max(attempt_count - 1, 0),
                     "started_at": utc_now(),
                     "updated_at": utc_now(),
                     "error": None,
                     "error_state": None,
                 },
-                "$inc": {"retry_count": 1},
             },
         )
         return result.modified_count == 1
@@ -199,45 +341,69 @@ class DurableJobStore:
         job_id: str,
         result: Mapping[str, Any] | None = None,
     ) -> None:
+        now = utc_now()
         self.jobs.update_one(
-            {"job_id": job_id},
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
             {
                 "$set": {
                     "status": SUCCEEDED,
                     "result": _normalise(result or {}),
                     "error": None,
                     "error_state": None,
-                    "completed_at": utc_now(),
-                    "updated_at": utc_now(),
+                    "completed_at": now,
+                    "updated_at": now,
                 },
             },
         )
 
     def mark_failed(self, job_id: str, error: str) -> str:
         job = self.get(job_id) or {}
-        retry_count = int(job.get("retry_count") or 0)
+        if job.get("status") in TERMINAL_STATUSES:
+            return str(job.get("status"))
+        attempt_count = int(job.get("attempt_count") or 0)
+        retry_count = max(attempt_count - 1, 0)
         max_attempts = int(job.get("max_attempts") or 1)
-        status = DEAD_LETTER if retry_count >= max_attempts else FAILED
+        status = DEAD_LETTER if attempt_count >= max_attempts else FAILED
         update: Dict[str, Any] = {
             "status": status,
+            "retry_count": retry_count,
             "error": error,
             "error_state": {
                 "message": error,
                 "failed_at": utc_now(),
-                "attempt": retry_count,
+                "attempt": attempt_count,
+                "retry_count": retry_count,
             },
             "updated_at": utc_now(),
         }
         if status == DEAD_LETTER:
             update["dead_lettered_at"] = utc_now()
             update["completed_at"] = utc_now()
-        self.jobs.update_one({"job_id": job_id}, {"$set": update})
+        result = self.jobs.update_one(
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
+            {"$set": update},
+        )
+        if getattr(result, "modified_count", 0) != 1:
+            current = self.get(job_id) or {}
+            return str(current.get("status") or status)
         return status
 
-    def reset_for_retry(self, job_id: str) -> None:
+    def reset_for_retry(self, job_id: str, clear_workflow: bool = False) -> None:
+        update = {
+            "status": QUEUED,
+            "updated_at": utc_now(),
+            "error": None,
+            "error_state": None,
+            "completed_at": None,
+            "dead_lettered_at": None,
+            "cancelled_at": None,
+        }
+        if clear_workflow:
+            update["workflow_id"] = None
+            update["run_id"] = None
         self.jobs.update_one(
             {"job_id": job_id},
-            {"$set": {"status": QUEUED, "updated_at": utc_now()}},
+            {"$set": update},
         )
 
 
@@ -287,8 +453,8 @@ async def run_job(
                 logger.exception("Durable job %s dead-lettered: %s", job_id, error)
                 return
             job = await asyncio.to_thread(store.get, job_id) or {}
-            retry_count = int(job.get("retry_count") or 1)
-            delay = min(retry_base_seconds * (2 ** max(retry_count - 1, 0)), 30.0)
+            attempt_count = int(job.get("attempt_count") or 1)
+            delay = min(retry_base_seconds * (2 ** max(attempt_count - 1, 0)), 30.0)
             logger.warning(
                 "Durable job %s failed; retrying in %.1fs: %s",
                 job_id,

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.api import dependencies as deps
 from src.api.routes import memory
+from src.api.routes.v2 import memory as memory_v2
 
 
 class FakeIngestPipeline:
@@ -38,12 +39,27 @@ class FakeJobStore:
             "timeout_seconds": timeout_seconds,
             "max_attempts": max_attempts,
             "retry_count": 0,
+            "attempt_count": 0,
+            "workflow_id": None,
         }
         self.jobs[job["job_id"]] = job
         return job, True
 
     def get(self, job_id):
         return self.jobs.get(job_id)
+
+    def mark_failed(self, job_id, error):
+        job = self.jobs[job_id]
+        job["status"] = "failed"
+        job["error"] = error
+        return "failed"
+
+    def reserve_workflow_start(self, job_id, workflow_id):
+        job = self.jobs[job_id]
+        if job["status"] != "queued" or job.get("workflow_id"):
+            return False
+        job["workflow_id"] = workflow_id
+        return True
 
 
 def _build_app(monkeypatch, user=None):
@@ -68,8 +84,8 @@ def _build_app(monkeypatch, user=None):
     app.dependency_overrides[deps.enforce_rate_limit] = fake_rate_limit
     app.include_router(memory.scrape_router)
     app.include_router(memory.router)
-    app.include_router(memory.v2_scrape_router)
-    app.include_router(memory.v2_router)
+    app.include_router(memory_v2.scrape_router)
+    app.include_router(memory_v2.router)
     return app, ingest
 
 
@@ -105,11 +121,14 @@ def test_v2_ingest_returns_durable_job_envelope(monkeypatch):
     app, ingest = _build_app(monkeypatch)
     store = FakeJobStore()
     scheduled = []
-    monkeypatch.setattr(memory, "get_default_job_store", lambda: store)
+    async def fake_start_job_workflow(job):
+        scheduled.append(job["job_id"])
+
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
-        memory,
-        "_schedule_job",
-        lambda job, handler: scheduled.append(job["job_id"]),
+        memory_v2,
+        "start_job_workflow",
+        fake_start_job_workflow,
     )
     payload = {
         "user_query": "remember this",
@@ -129,6 +148,37 @@ def test_v2_ingest_returns_durable_job_envelope(monkeypatch):
         "status_url": "/v2/memory/ingest/memory_ingest:fake/status",
     }
     assert scheduled == ["memory_ingest:fake"]
+    assert ingest.calls == []
+
+
+def test_v2_ingest_start_failure_returns_durable_job_handle(monkeypatch):
+    app, ingest = _build_app(monkeypatch)
+    store = FakeJobStore()
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(
+        memory_v2,
+        "start_job_workflow",
+        fake_start_job_workflow,
+    )
+    payload = {
+        "user_query": "remember this",
+        "agent_response": "done",
+        "user_id": "body-user",
+    }
+
+    response = TestClient(app).post("/v2/memory/ingest", json=payload)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["data"]["job_id"] == "memory_ingest:fake"
+    assert body["data"]["status"] == "failed"
+    assert body["data"]["status_url"] == "/v2/memory/ingest/memory_ingest:fake/status"
+    assert store.jobs["memory_ingest:fake"]["error"] == "temporal unavailable"
     assert ingest.calls == []
 
 
@@ -155,11 +205,14 @@ def test_v2_batch_ingest_queues_scoped_items_for_local_static_key(monkeypatch):
     app, ingest = _build_app(monkeypatch, user=static_user)
     store = FakeJobStore()
     scheduled = []
-    monkeypatch.setattr(memory, "get_default_job_store", lambda: store)
+    async def fake_start_job_workflow(job):
+        scheduled.append(job["job_id"])
+
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
     monkeypatch.setattr(
-        memory,
-        "_schedule_job",
-        lambda job, handler: scheduled.append(job["job_id"]),
+        memory_v2,
+        "start_job_workflow",
+        fake_start_job_workflow,
     )
     payload = {
         "items": [
