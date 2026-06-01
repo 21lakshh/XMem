@@ -136,6 +136,18 @@ class Settings(BaseSettings):
         default=0.4,
         description="LLM temperature for generation"
     )
+    summary_judge_similarity_threshold: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Threshold score for the Judge to match summary memories"
+    )
+    temporal_search_similarity_threshold: float = Field(
+        default=0.3,
+        ge=-1.0,
+        le=1.0,
+        description="Minimum cosine similarity threshold score for Neo4j temporal search"
+    )
     llm_timeout_seconds: float = Field(
         default=45.0,
         description="Per-agent LLM call timeout in seconds",
