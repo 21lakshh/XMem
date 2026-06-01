@@ -1,253 +1,53 @@
-"""Billing and Razorpay payment routes."""
+"""Billing routes backed by the modular credit ledger."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
+import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
 
 from src.api.dependencies import get_current_user
+from src.billing.razorpay import (
+    RazorpayConfigError,
+    create_order,
+    create_subscription,
+    require_razorpay_keys,
+    verify_order_signature,
+    verify_subscription_signature,
+    verify_webhook_signature,
+)
+from src.billing.service import get_default_billing_service, public_plans, public_topups
+from src.billing.types import (
+    BillingSummary,
+    CheckoutRequest,
+    CheckoutResponse,
+    LedgerEntryPublic,
+    PlanPublic,
+    TopUpPackPublic,
+    VerifyPaymentRequest,
+)
 from src.config import settings
+from src.utils import billing as billing_config
 
 logger = logging.getLogger("xmem.api.billing")
 
 router = APIRouter(prefix="/api/billing", tags=["Billing"])
 
 
-class BillingPlan(BaseModel):
-    id: str
-    name: str
-    amount: int
-    currency: str
-    description: str
-    features: List[str]
-
-
-class UsageSnapshot(BaseModel):
-    memories_written: int = 0
-    retrievals: int = 0
-    graph_queries: int = 0
-    credits_used: int = 0
-    credits_limit: int = 5000
-
-
-class Invoice(BaseModel):
-    id: str
-    date: datetime
-    amount_paise: int
-    status: Literal["paid", "pending", "failed"]
-    credits: int = 0
-    receipt_url: Optional[str] = None
-
-
-class BillingSummary(BaseModel):
-    plan_name: str
-    account_status: Literal["active", "trial", "paused", "past_due"]
-    currency: str
-    credit_balance: int
-    prepaid_balance_paise: int
-    current_month: UsageSnapshot
-    next_invoice_paise: int
-    last_payment_at: Optional[datetime] = None
-    invoices: List[Invoice] = Field(default_factory=list)
-
-
 class BillingSummaryResponse(BaseModel):
     summary: BillingSummary
-    plans: List[BillingPlan]
+    plans: list[PlanPublic]
+    topups: list[TopUpPackPublic]
 
 
-class CreateRazorpayOrderRequest(BaseModel):
-    package_id: str = Field(..., description="Plan/package ID selected by the user")
-    credits: int = Field(default=0, ge=0)
-    amount: int = Field(default=0, ge=0)
-    currency: str = Field(default="INR", min_length=3, max_length=3)
-
-
-class RazorpayOrderResponse(BaseModel):
-    id: str
-    order_id: str
-    amount: int
-    currency: str
-    key_id: str
-    receipt: str
-    package_id: str
-
-
-class VerifyRazorpayPaymentRequest(BaseModel):
-    razorpay_payment_id: str
-    razorpay_order_id: str
-    razorpay_signature: str
-    package_id: str
-    credits: int = Field(default=0, ge=0)
-    amount: int = Field(default=0, ge=0)
-    currency: str = Field(default="INR", min_length=3, max_length=3)
-
-
-class VerifyRazorpayPaymentResponse(BaseModel):
-    status: Literal["ok"]
+class VerifyPaymentResponse(BaseModel):
+    status: str = "ok"
     summary: BillingSummary
-
-
-_PLANS: Dict[str, BillingPlan] = {
-    "free": BillingPlan(
-        id="free",
-        name="Free",
-        amount=0,
-        currency="USD",
-        description="30 days free with access to the core platform, Chrome extension, MCP, and SDKs.",
-        features=[
-            "Full XMem dashboard access",
-            "Chrome extension included",
-            "MCP server access included",
-            "Python and TypeScript SDKs included",
-            "No credit card required",
-        ],
-    ),
-    "pro": BillingPlan(
-        id="pro",
-        name="Pro",
-        amount=100,
-        currency="USD",
-        description="Full access for production apps, priority support, and pay-as-you-go usage.",
-        features=[
-            "Everything in Free",
-            "Production-ready API access",
-            "Pay-as-you-go usage for higher volume",
-            "24/7 customer support",
-            "Access to exclusive features coming soon",
-        ],
-    ),
-    "enterprise": BillingPlan(
-        id="enterprise",
-        name="Enterprise",
-        amount=0,
-        currency="USD",
-        description="Dedicated onboarding, custom limits, security reviews, and team support.",
-        features=[
-            "Everything in Pro",
-            "Custom usage limits",
-            "Security and procurement support",
-            "Dedicated onboarding",
-        ],
-    ),
-}
-
-_in_memory_billing: Dict[str, Dict[str, Any]] = {}
-_in_memory_orders: Dict[str, Dict[str, Any]] = {}
-
-
-class BillingStore:
-    """Small billing metadata store backed by MongoDB with local memory fallback."""
-
-    def __init__(self) -> None:
-        self._client = None
-        self._db = None
-        self.billing = None
-        self.orders = None
-        self._connected = False
-        self._in_memory = False
-        self._try_connect()
-
-    def _requires_durable_storage(self) -> bool:
-        return settings.environment.lower() in {"production", "prod"}
-
-    def _enable_memory_fallback(self, error: Exception) -> None:
-        message = f"MongoDB connection failed for billing storage: {error}"
-        if self._requires_durable_storage():
-            logger.error("%s; refusing in-memory fallback in production", message)
-            raise RuntimeError(
-                "MongoDB is required for billing storage when ENVIRONMENT=production"
-            ) from error
-        logger.warning("%s; using in-memory billing storage", message)
-        self._connected = False
-        self._in_memory = True
-
-    def _try_connect(self) -> None:
-        provider = (settings.app_store_provider or "mongo").strip().lower()
-        if provider == "memory":
-            self._connected = False
-            self._in_memory = True
-            return
-        if provider == "postgres":
-            self._enable_memory_fallback(RuntimeError("Postgres billing storage is not implemented"))
-            return
-
-        try:
-            from pymongo import ASCENDING, MongoClient
-
-            self._client = MongoClient(settings.mongodb_uri, serverSelectionTimeoutMS=5000)
-            self._client.admin.command("ping")
-            self._db = self._client[settings.mongodb_database]
-            self.billing = self._db["billing_profiles"]
-            self.orders = self._db["billing_orders"]
-            self.billing.create_index([("user_id", ASCENDING)], unique=True)
-            self.orders.create_index([("order_id", ASCENDING)], unique=True)
-            self.orders.create_index([("user_id", ASCENDING)])
-            self._connected = True
-            self._in_memory = False
-        except Exception as exc:
-            self._enable_memory_fallback(exc)
-
-    def get_summary(self, user_id: str) -> BillingSummary:
-        if self._in_memory:
-            summary = _in_memory_billing.setdefault(
-                user_id,
-                _default_summary().model_dump(),
-            )
-            return BillingSummary.model_validate(summary)
-
-        doc = self.billing.find_one({"user_id": user_id})
-        if not doc:
-            summary = _default_summary()
-            self.save_summary(user_id, summary)
-            return summary
-
-        doc.pop("_id", None)
-        doc.pop("user_id", None)
-        return BillingSummary.model_validate(doc)
-
-    def save_summary(self, user_id: str, summary: BillingSummary) -> None:
-        payload = summary.model_dump()
-        if self._in_memory:
-            _in_memory_billing[user_id] = payload
-            return
-
-        self.billing.update_one(
-            {"user_id": user_id},
-            {"$set": {"user_id": user_id, **payload}},
-            upsert=True,
-        )
-
-    def save_order(self, order_id: str, order: Dict[str, Any]) -> None:
-        payload = {"order_id": order_id, **order}
-        if self._in_memory:
-            _in_memory_orders[order_id] = payload
-            return
-
-        self.orders.update_one(
-            {"order_id": order_id},
-            {"$set": payload},
-            upsert=True,
-        )
-
-    def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
-        if self._in_memory:
-            return _in_memory_orders.get(order_id)
-
-        doc = self.orders.find_one({"order_id": order_id})
-        if doc:
-            doc.pop("_id", None)
-        return doc
-
-
-_billing_store = BillingStore()
 
 
 async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
@@ -267,169 +67,257 @@ def _user_id(user: dict) -> str:
     return str(user_id)
 
 
-def _default_summary() -> BillingSummary:
-    return BillingSummary(
-        plan_name="Free trial",
-        account_status="trial",
-        currency="INR",
-        credit_balance=5000,
-        prepaid_balance_paise=0,
-        current_month=UsageSnapshot(),
-        next_invoice_paise=0,
-        invoices=[],
-    )
+def _receipt(user_id: str, package_id: str) -> str:
+    ts = int(datetime.now(timezone.utc).timestamp())
+    safe_user = user_id.replace(":", "_")[:16]
+    return f"xmem-{package_id}-{safe_user}-{ts}"
 
 
-def _get_summary(user_id: str) -> BillingSummary:
-    return _billing_store.get_summary(user_id)
+def _pack_or_plan(package_id: str) -> tuple[str, dict[str, Any]]:
+    if package_id in billing_config.PLANS:
+        return "plan", billing_config.PLANS[package_id]
+    if package_id in billing_config.TOP_UP_PACKS:
+        return "topup", billing_config.TOP_UP_PACKS[package_id]
+    raise HTTPException(status_code=400, detail="Unknown billing package")
 
 
-def _require_razorpay_config() -> tuple[str, str]:
-    if not settings.razorpay_key_id or not settings.razorpay_key_secret:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.",
-        )
-    return settings.razorpay_key_id, settings.razorpay_key_secret
-
-
-def _get_plan(package_id: str) -> BillingPlan:
-    plan = _PLANS.get(package_id)
-    if not plan:
-        raise HTTPException(status_code=400, detail="Unknown billing plan")
-    return plan
-
-
-def _verify_signature(order_id: str, payment_id: str, signature: str, secret: str) -> bool:
-    payload = f"{order_id}|{payment_id}".encode("utf-8")
-    expected = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
-@router.get("/plans", response_model=List[BillingPlan])
-async def list_billing_plans() -> List[BillingPlan]:
-    """Return the server-authoritative billing plans."""
-    return list(_PLANS.values())
+@router.get("/plans", response_model=list[PlanPublic])
+async def list_billing_plans() -> list[PlanPublic]:
+    return public_plans()
 
 
 @router.get("/summary", response_model=BillingSummaryResponse)
 async def billing_summary(current_user: dict = Depends(require_auth)) -> BillingSummaryResponse:
-    """Return the current user's billing summary."""
+    service = get_default_billing_service()
     return BillingSummaryResponse(
-        summary=_get_summary(_user_id(current_user)),
-        plans=list(_PLANS.values()),
+        summary=service.get_billing_summary(current_user),
+        plans=public_plans(),
+        topups=public_topups(),
     )
 
 
-@router.post("/razorpay/order", response_model=RazorpayOrderResponse)
-async def create_razorpay_order(
-    request: CreateRazorpayOrderRequest,
+@router.post("/razorpay/order", response_model=CheckoutResponse)
+async def create_razorpay_checkout(
+    request: CheckoutRequest,
     current_user: dict = Depends(require_auth),
-) -> RazorpayOrderResponse:
-    """Create a Razorpay order for the selected plan.
-
-    The server owns plan amount and currency. Client-supplied amount/currency are
-    accepted only for compatibility and are intentionally ignored.
-    """
-    key_id, key_secret = _require_razorpay_config()
-    plan = _get_plan(request.package_id)
-
-    if plan.id != "pro":
-        raise HTTPException(status_code=400, detail="Only the Pro plan can be purchased online")
+) -> CheckoutResponse:
+    try:
+        key_id, _ = require_razorpay_keys()
+    except RazorpayConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     user_id = _user_id(current_user)
-    receipt = f"xmem-{user_id[:16]}-{int(datetime.now(timezone.utc).timestamp())}"
+    package_type, package = _pack_or_plan(request.package_id)
+    service = get_default_billing_service()
+    account = service.ensure_billing_account(current_user)
 
-    payload = {
-        "amount": plan.amount,
-        "currency": plan.currency,
-        "receipt": receipt,
-        "notes": {
-            "user_id": user_id,
-            "package_id": plan.id,
-            "plan_name": plan.name,
-        },
+    if request.package_id == "free":
+        raise HTTPException(status_code=400, detail="Free plan does not require checkout")
+
+    notes = {
+        "user_id": user_id,
+        "billing_account_id": account["id"],
+        "package_id": request.package_id,
+        "package_type": package_type,
     }
+    receipt = _receipt(user_id, request.package_id)
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                "https://api.razorpay.com/v1/orders",
-                auth=(key_id, key_secret),
-                json=payload,
+        if request.package_id == "pro" and settings.razorpay_pro_plan_id:
+            subscription = await create_subscription(
+                plan_id=settings.razorpay_pro_plan_id,
+                notes=notes,
             )
+            checkout_id = str(subscription["id"])
+            service.store.save_checkout(
+                checkout_id,
+                {
+                    "type": "subscription",
+                    "user_id": user_id,
+                    "billing_account_id": account["id"],
+                    "package_id": request.package_id,
+                    "subscription_id": checkout_id,
+                    "status": "created",
+                },
+            )
+            return CheckoutResponse(
+                id=checkout_id,
+                subscription_id=checkout_id,
+                package_id=request.package_id,
+                amount=int(package["price_paise"]),
+                currency=str(package.get("currency") or "INR"),
+                key_id=key_id,
+                receipt=receipt,
+            )
+
+        amount = int(package["price_paise"])
+        order = await create_order(
+            amount_paise=amount,
+            currency=str(package.get("currency") or "INR"),
+            receipt=receipt,
+            notes=notes,
+        )
     except httpx.HTTPError as exc:
-        logger.exception("Failed to create Razorpay order")
-        raise HTTPException(status_code=502, detail="Failed to reach Razorpay") from exc
+        raise HTTPException(status_code=502, detail="Razorpay checkout creation failed") from exc
 
-    if response.status_code >= 400:
-        logger.warning("Razorpay order creation failed: %s %s", response.status_code, response.text[:500])
-        raise HTTPException(status_code=502, detail="Razorpay order creation failed")
-
-    order = response.json()
-    order_id = order["id"]
-    _billing_store.save_order(order_id, {
-        "user_id": user_id,
-        "package_id": plan.id,
-        "amount": plan.amount,
-        "currency": plan.currency,
-        "receipt": receipt,
-        "created_at": datetime.now(timezone.utc),
-    })
-
-    return RazorpayOrderResponse(
+    order_id = str(order["id"])
+    service.store.save_checkout(
+        order_id,
+        {
+            "type": package_type,
+            "user_id": user_id,
+            "billing_account_id": account["id"],
+            "package_id": request.package_id,
+            "order_id": order_id,
+            "amount": amount,
+            "currency": str(package.get("currency") or "INR"),
+            "status": "created",
+        },
+    )
+    return CheckoutResponse(
         id=order_id,
         order_id=order_id,
-        amount=plan.amount,
-        currency=plan.currency,
+        package_id=request.package_id,
+        amount=amount,
+        currency=str(package.get("currency") or "INR"),
         key_id=key_id,
         receipt=receipt,
-        package_id=plan.id,
     )
 
 
-@router.post("/razorpay/verify", response_model=VerifyRazorpayPaymentResponse)
-async def verify_razorpay_payment(
-    request: VerifyRazorpayPaymentRequest,
+@router.post("/topups", response_model=CheckoutResponse)
+async def create_topup_checkout(
+    request: CheckoutRequest,
     current_user: dict = Depends(require_auth),
-) -> VerifyRazorpayPaymentResponse:
-    """Verify a Razorpay checkout signature and activate the paid plan."""
-    _, key_secret = _require_razorpay_config()
-    plan = _get_plan(request.package_id)
+) -> CheckoutResponse:
+    if request.package_id not in billing_config.TOP_UP_PACKS:
+        raise HTTPException(status_code=400, detail="Unknown top-up pack")
+    return await create_razorpay_checkout(request, current_user)
 
-    if not _verify_signature(
-        request.razorpay_order_id,
-        request.razorpay_payment_id,
-        request.razorpay_signature,
-        key_secret,
-    ):
-        raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
 
+@router.post("/razorpay/verify", response_model=VerifyPaymentResponse)
+async def verify_razorpay_payment(
+    request: VerifyPaymentRequest,
+    current_user: dict = Depends(require_auth),
+) -> VerifyPaymentResponse:
+    service = get_default_billing_service()
     user_id = _user_id(current_user)
-    tracked_order = _billing_store.get_order(request.razorpay_order_id)
-    if tracked_order and tracked_order.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Payment order does not belong to this user")
-    if tracked_order and tracked_order.get("package_id") != plan.id:
-        raise HTTPException(status_code=400, detail="Payment order package mismatch")
 
-    now = datetime.now(timezone.utc)
-    summary = _get_summary(user_id)
-    summary.plan_name = plan.name
-    summary.account_status = "active"
-    summary.currency = plan.currency
-    summary.prepaid_balance_paise += plan.amount
-    summary.next_invoice_paise = 0
-    summary.last_payment_at = now
-    summary.invoices.insert(
-        0,
-        Invoice(
-            id=request.razorpay_payment_id,
-            date=now,
-            amount_paise=plan.amount,
-            status="paid",
-            credits=0,
-        ),
+    if request.razorpay_subscription_id:
+        if not verify_subscription_signature(
+            request.razorpay_subscription_id,
+            request.razorpay_payment_id,
+            request.razorpay_signature,
+        ):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
+        service.grant_pro_subscription(
+            user_id=user_id,
+            payment_id=request.razorpay_payment_id,
+            subscription_id=request.razorpay_subscription_id,
+        )
+    elif request.razorpay_order_id:
+        if not verify_order_signature(
+            request.razorpay_order_id,
+            request.razorpay_payment_id,
+            request.razorpay_signature,
+        ):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
+        checkout = service.store.get_checkout(request.razorpay_order_id)
+        if checkout and checkout.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Payment order does not belong to this user")
+        package_id = str((checkout or {}).get("package_id") or request.package_id)
+        if package_id == "pro":
+            service.grant_pro_subscription(
+                user_id=user_id,
+                payment_id=request.razorpay_payment_id,
+                subscription_id=request.razorpay_order_id,
+            )
+        else:
+            service.grant_topup(
+                user_id=user_id,
+                pack_id=package_id,
+                payment_id=request.razorpay_payment_id,
+                order_id=request.razorpay_order_id,
+            )
+    else:
+        raise HTTPException(status_code=400, detail="Missing Razorpay order or subscription id")
+
+    return VerifyPaymentResponse(summary=service.get_billing_summary(current_user))
+
+
+@router.post("/razorpay/webhook")
+async def razorpay_webhook(request: Request) -> dict[str, str]:
+    body = await request.body()
+    signature = request.headers.get("x-razorpay-signature", "")
+    try:
+        if not verify_webhook_signature(body, signature):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature")
+    except RazorpayConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    payload = json.loads(body.decode("utf-8"))
+    event_id = str(
+        request.headers.get("x-razorpay-event-id")
+        or payload.get("id")
+        or ""
     )
-    _billing_store.save_summary(user_id, summary)
+    event_name = str(payload.get("event") or "")
+    service = get_default_billing_service()
+    first_seen = service.store.mark_payment_event(
+        event_id,
+        {"event": event_name, "payload": payload},
+    )
+    if not first_seen:
+        return {"status": "ignored_duplicate"}
 
-    return VerifyRazorpayPaymentResponse(status="ok", summary=summary)
+    payment = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
+    subscription = (((payload.get("payload") or {}).get("subscription") or {}).get("entity") or {})
+    order = (((payload.get("payload") or {}).get("order") or {}).get("entity") or {})
+    notes = payment.get("notes") or subscription.get("notes") or order.get("notes") or {}
+    user_id = str(notes.get("user_id") or "")
+    package_id = str(notes.get("package_id") or "")
+    payment_id = str(payment.get("id") or payload.get("id") or "")
+    order_id = str(payment.get("order_id") or order.get("id") or "")
+    subscription_id = str(payment.get("subscription_id") or subscription.get("id") or "")
+
+    if not user_id or not package_id:
+        logger.info("Ignoring Razorpay webhook without XMem user/package notes: %s", event_name)
+        return {"status": "ignored"}
+
+    if event_name in {"payment.captured", "order.paid", "subscription.charged"}:
+        if package_id == "pro":
+            service.grant_pro_subscription(
+                user_id=user_id,
+                payment_id=payment_id or event_id,
+                subscription_id=subscription_id or order_id or event_id,
+            )
+        elif package_id in billing_config.TOP_UP_PACKS:
+            service.grant_topup(
+                user_id=user_id,
+                pack_id=package_id,
+                payment_id=payment_id or event_id,
+                order_id=order_id or event_id,
+            )
+
+    return {"status": "ok"}
+
+
+@router.get("/ledger", response_model=list[LedgerEntryPublic])
+async def billing_ledger(
+    current_user: dict = Depends(require_auth),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[LedgerEntryPublic]:
+    service = get_default_billing_service()
+    return [
+        LedgerEntryPublic(
+            id=str(entry["id"]),
+            type=str(entry["type"]),
+            amount=int(entry["amount"]),
+            idempotency_key=str(entry["idempotency_key"]),
+            job_id=entry.get("job_id"),
+            source=entry.get("source"),
+            metadata=entry.get("metadata") or {},
+            created_at=entry["created_at"],
+        )
+        for entry in service.list_ledger(current_user, limit=limit)
+    ]

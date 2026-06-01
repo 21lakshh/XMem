@@ -473,6 +473,10 @@ class Settings(BaseSettings):
         default=None,
         description="Optional Razorpay webhook signing secret"
     )
+    razorpay_pro_plan_id: Optional[str] = Field(
+        default=None,
+        description="Razorpay subscription plan ID for the Pro plan",
+    )
 
     @field_validator("fallback_order")
     @classmethod

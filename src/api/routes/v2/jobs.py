@@ -17,6 +17,7 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import cancel_job_workflow, start_job_workflow
 from src.api.schemas import APIResponse
+from src.billing.service import InsufficientCredits, get_default_billing_service, release_job_billing
 from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
 
 router = APIRouter(
@@ -112,6 +113,24 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
     if job.get("status") not in {"failed", "dead_letter", "cancelled"}:
         return _error(request, "Only failed, dead-lettered, or cancelled jobs can be retried.", 409, elapsed_ms(start))
 
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    billing_account_id = payload.get("billing_account_id")
+    if billing_account_id:
+        billing_service = get_default_billing_service()
+        try:
+            estimate = billing_service.estimate_required_credits(job.get("job_type") or "", payload)
+            reservation = await asyncio.to_thread(
+                billing_service.reserve_credits,
+                billing_account_id,
+                job_id,
+                estimate.reserved_credits,
+            )
+            payload["billing_reservation_id"] = reservation.reservation_id
+            payload["billing_estimate"] = estimate.model_dump()
+            await asyncio.to_thread(get_default_job_store().update_payload, job_id, payload)
+        except InsufficientCredits as exc:
+            return _error(request, str(exc), 402, elapsed_ms(start))
+
     await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
     try:
@@ -138,6 +157,7 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
     except Exception as exc:
         error = str(exc) or exc.__class__.__name__
         return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
+    await asyncio.to_thread(release_job_billing, job, "cancelled")
     await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
     await asyncio.to_thread(_mark_scanner_job_cancelled, job)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)

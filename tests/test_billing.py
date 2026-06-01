@@ -1,0 +1,126 @@
+import os
+from datetime import timedelta
+
+os.environ.setdefault("APP_STORE_PROVIDER", "memory")
+os.environ.setdefault("FALLBACK_ORDER", '["ollama"]')
+os.environ.setdefault("NEO4J_PASSWORD", "test")
+
+import pytest
+
+from src.billing import store as billing_store
+from src.billing.service import BillingService
+from src.billing.store import BillingStore, InsufficientCredits, utc_now
+from src.utils import billing as billing_config
+
+
+@pytest.fixture(autouse=True)
+def clear_memory_billing():
+    billing_store._memory_accounts.clear()
+    billing_store._memory_wallets.clear()
+    billing_store._memory_lots.clear()
+    billing_store._memory_ledger.clear()
+    billing_store._memory_reservations.clear()
+    billing_store._memory_usage_events.clear()
+    billing_store._memory_payments.clear()
+
+
+def service() -> BillingService:
+    return BillingService(BillingStore())
+
+
+def test_token_estimate_uses_configured_chars_per_token():
+    assert billing_config.estimate_tokens("a" * 9) == 3
+
+
+def test_pro_nominal_credit_value():
+    assert billing_config.nominal_paise_per_credit("pro") == pytest.approx(1.98)
+
+
+def test_free_trial_grant_is_idempotent():
+    svc = service()
+    user = {"id": "user_1"}
+
+    first = svc.ensure_billing_account(user)
+    second = svc.ensure_billing_account(user)
+
+    assert first["id"] == second["id"]
+    summary = svc.get_billing_summary(user)
+    assert summary.available_credits == 10_000
+    grants = [entry for entry in svc.list_ledger(user) if entry["type"] == "grant"]
+    assert len(grants) == 1
+
+
+def test_reservation_debit_and_refund_flow():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+
+    reservation = svc.reserve_credits(account["id"], "job_1", 1000)
+    assert reservation.available_credits == 9000
+
+    svc.commit_job_debit(account["id"], "job_1", 750)
+    summary = svc.get_billing_summary(user)
+
+    assert summary.available_credits == 9250
+    assert summary.reserved_credits == 0
+    ledger_types = {entry["type"] for entry in svc.list_ledger(user)}
+    assert {"reserve", "debit", "refund"}.issubset(ledger_types)
+
+
+def test_failed_job_releases_reserved_credits():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+
+    svc.reserve_credits(account["id"], "job_1", 1000)
+    svc.release_job_reservation(account["id"], "job_1")
+
+    summary = svc.get_billing_summary(user)
+    assert summary.available_credits == 10_000
+    assert summary.reserved_credits == 0
+
+
+def test_insufficient_credits_blocks_reservation():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+
+    with pytest.raises(InsufficientCredits):
+        svc.reserve_credits(account["id"], "job_1", 10_001)
+
+
+def test_pro_grant_is_idempotent_per_payment():
+    svc = service()
+
+    svc.grant_pro_subscription(
+        user_id="user_1",
+        payment_id="pay_1",
+        subscription_id="sub_1",
+        period_end=utc_now() + timedelta(days=30),
+    )
+    svc.grant_pro_subscription(
+        user_id="user_1",
+        payment_id="pay_1",
+        subscription_id="sub_1",
+        period_end=utc_now() + timedelta(days=30),
+    )
+
+    summary = svc.get_billing_summary({"id": "user_1"})
+    assert summary.available_credits == 15_000
+    pro_grants = [
+        entry
+        for entry in svc.list_ledger({"id": "user_1"})
+        if entry["source"] == "pro_monthly"
+    ]
+    assert len(pro_grants) == 1
+
+
+def test_billing_config_changes_affect_estimates(monkeypatch):
+    svc = service()
+    payload = {"user_query": "a" * 400, "agent_response": "", "effort_level": "low"}
+    baseline = svc.estimate_required_credits("memory_ingest", payload)
+
+    monkeypatch.setitem(billing_config.WORKFLOW_MULTIPLIERS, "memory_ingest_low", 2.0)
+    changed = svc.estimate_required_credits("memory_ingest", payload)
+
+    assert changed.billable_credits == baseline.billable_credits * 2
