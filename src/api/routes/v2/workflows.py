@@ -53,10 +53,6 @@ async def _execute(name: str, arg: Any, timeout_seconds: float) -> Any:
     )
 
 
-def _is_cancelled(exc: BaseException) -> bool:
-    return exc.__class__.__name__ == "CancelledError"
-
-
 async def _mark_dead(job_id: str, exc: BaseException) -> Dict[str, Any]:
     error = str(exc) or exc.__class__.__name__
     await _execute(
@@ -185,8 +181,6 @@ class MemoryIngestWorkflow:
         except CancelledError:
             raise
         except Exception as exc:
-            if _is_cancelled(exc):
-                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -231,8 +225,6 @@ class MemoryBatchIngestWorkflow:
         except CancelledError:
             raise
         except Exception as exc:
-            if _is_cancelled(exc):
-                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -249,8 +241,6 @@ class MemoryScrapeWorkflow:
         except CancelledError:
             raise
         except Exception as exc:
-            if _is_cancelled(exc):
-                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -269,8 +259,6 @@ class ScannerScanWorkflow:
         except CancelledError:
             raise
         except Exception as exc:
-            if _is_cancelled(exc):
-                raise
             return await _mark_dead(job_id, exc)
 
 
@@ -287,8 +275,6 @@ class ScannerPhase2Workflow:
         except CancelledError:
             raise
         except Exception as exc:
-            if _is_cancelled(exc):
-                raise
             return await _mark_dead(job_id, exc)
 
 

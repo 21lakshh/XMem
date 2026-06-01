@@ -48,6 +48,12 @@ class FakeJobStore:
     def get(self, job_id):
         return self.jobs.get(job_id)
 
+    def mark_failed(self, job_id, error):
+        job = self.jobs[job_id]
+        job["status"] = "failed"
+        job["error"] = error
+        return "failed"
+
     def reserve_workflow_start(self, job_id, workflow_id):
         job = self.jobs[job_id]
         if job["status"] != "queued" or job.get("workflow_id"):
@@ -142,6 +148,37 @@ def test_v2_ingest_returns_durable_job_envelope(monkeypatch):
         "status_url": "/v2/memory/ingest/memory_ingest:fake/status",
     }
     assert scheduled == ["memory_ingest:fake"]
+    assert ingest.calls == []
+
+
+def test_v2_ingest_start_failure_returns_durable_job_handle(monkeypatch):
+    app, ingest = _build_app(monkeypatch)
+    store = FakeJobStore()
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    monkeypatch.setattr(memory_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(
+        memory_v2,
+        "start_job_workflow",
+        fake_start_job_workflow,
+    )
+    payload = {
+        "user_query": "remember this",
+        "agent_response": "done",
+        "user_id": "body-user",
+    }
+
+    response = TestClient(app).post("/v2/memory/ingest", json=payload)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["data"]["job_id"] == "memory_ingest:fake"
+    assert body["data"]["status"] == "failed"
+    assert body["data"]["status_url"] == "/v2/memory/ingest/memory_ingest:fake/status"
+    assert store.jobs["memory_ingest:fake"]["error"] == "temporal unavailable"
     assert ingest.calls == []
 
 

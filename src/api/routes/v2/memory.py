@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from src.api.dependencies import enforce_rate_limit, require_api_key, require_ready
 from src.api.routes import memory as memory_v1
@@ -17,7 +18,7 @@ from src.api.routes.v2.shared import (
     read_user_job,
 )
 from src.api.routes.v2.temporal_client import start_job_workflow
-from src.api.schemas import APIResponse, BatchIngestRequest, IngestRequest, ScrapeRequest
+from src.api.schemas import APIResponse, BatchIngestRequest, IngestRequest, ScrapeRequest, StatusEnum
 from src.config import settings
 from src.jobs.durable import QUEUED, get_default_job_store, new_attempt_id, stable_hash
 
@@ -36,6 +37,34 @@ scrape_router = APIRouter(
 
 def _content_hash(payload: Dict[str, Any]) -> str:
     return stable_hash(payload)
+
+
+class WorkflowStartFailed(RuntimeError):
+    def __init__(self, job: Dict[str, Any], error: str) -> None:
+        super().__init__(error)
+        self.job = job
+
+
+def _workflow_start_error(
+    request: Request,
+    job: Dict[str, Any],
+    detail: str,
+    status_url: str,
+    elapsed: float,
+) -> JSONResponse:
+    body = APIResponse(
+        status=StatusEnum.ERROR,
+        request_id=getattr(request.state, "request_id", None),
+        data={
+            "job_id": job["job_id"],
+            "job_type": job.get("job_type"),
+            "status": job.get("status"),
+            "status_url": status_url,
+        },
+        error=detail,
+        elapsed_ms=elapsed,
+    )
+    return JSONResponse(content=body.model_dump(), status_code=503)
 
 
 async def _enqueue_and_start(
@@ -74,7 +103,8 @@ async def _enqueue_and_start(
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             await asyncio.to_thread(store.mark_failed, job["job_id"], error)
-            raise
+            job = await asyncio.to_thread(store.get, job["job_id"]) or job
+            raise WorkflowStartFailed(job, error) from exc
         job = await asyncio.to_thread(store.get, job["job_id"]) or job
     return job, created
 
@@ -112,6 +142,14 @@ async def ingest_memory_v2(req: IngestRequest, request: Request, user: dict = De
             job,
             created,
             f"/v2/memory/ingest/{job['job_id']}/status",
+            elapsed_ms(start),
+        )
+    except WorkflowStartFailed as exc:
+        return _workflow_start_error(
+            request,
+            exc.job,
+            str(exc),
+            f"/v2/memory/ingest/{exc.job['job_id']}/status",
             elapsed_ms(start),
         )
     except Exception as exc:
@@ -165,6 +203,14 @@ async def batch_ingest_memory_v2(req: BatchIngestRequest, request: Request, user
             f"/v2/memory/jobs/{job['job_id']}/status",
             elapsed_ms(start),
         )
+    except WorkflowStartFailed as exc:
+        return _workflow_start_error(
+            request,
+            exc.job,
+            str(exc),
+            f"/v2/memory/jobs/{exc.job['job_id']}/status",
+            elapsed_ms(start),
+        )
     except Exception as exc:
         return _error(request, str(exc), 500, elapsed_ms(start))
 
@@ -189,6 +235,14 @@ async def scrape_chat_link_v2(req: ScrapeRequest, request: Request):
             job,
             created,
             f"/v2/memory/scrape/{job['job_id']}/status",
+            elapsed_ms(start),
+        )
+    except WorkflowStartFailed as exc:
+        return _workflow_start_error(
+            request,
+            exc.job,
+            str(exc),
+            f"/v2/memory/scrape/{exc.job['job_id']}/status",
             elapsed_ms(start),
         )
     except Exception as exc:
