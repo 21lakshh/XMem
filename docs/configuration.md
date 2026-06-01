@@ -138,6 +138,33 @@ ollama pull llama3.1:8b
 
 You can also mix local and cloud fallback:
 
+For DeepSeek, configure the dedicated provider entry so XMem can distinguish it
+from official OpenAI:
+
+```env
+FALLBACK_ORDER=["deepseek"]
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+For Xiaomi MiMo, use the dedicated `mimo` provider:
+
+```env
+FALLBACK_ORDER=["mimo"]
+MIMO_API_KEY=...
+MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+MIMO_MODEL=mimo-v2.5-pro
+MIMO_VISION_MODEL=mimo-v2.5
+```
+
+This keeps routing explicit in both `.env` and `npm run doctor`, while leaving
+the existing `openai` provider reserved for official OpenAI endpoints.
+
+DeepSeek and MiMo both expose OpenAI-compatible chat APIs, but XMem treats them
+as separate providers so local setup, diagnostics, and model selection stay
+obvious in the environment file.
+
 ```env
 FALLBACK_ORDER=["ollama", "openrouter", "gemini"]
 ```

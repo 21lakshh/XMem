@@ -52,6 +52,38 @@ class Settings(BaseSettings):
         default="gpt-4.1-mini",
         description="OpenAI vision model name (must support image input)"
     )
+    deepseek_api_key: Optional[str] = Field(
+        default=None,
+        description="DeepSeek API key"
+    )
+    deepseek_base_url: str = Field(
+        default="https://api.deepseek.com",
+        description="Base URL for the DeepSeek OpenAI-compatible API"
+    )
+    deepseek_model: str = Field(
+        default="deepseek-v4-flash",
+        description="DeepSeek model name"
+    )
+    deepseek_vision_model: str = Field(
+        default="deepseek-v4-flash",
+        description="DeepSeek vision model name"
+    )
+    mimo_api_key: Optional[str] = Field(
+        default=None,
+        description="Xiaomi MiMo API key"
+    )
+    mimo_base_url: str = Field(
+        default="https://api.xiaomimimo.com/v1",
+        description="Base URL for the Xiaomi MiMo OpenAI-compatible API"
+    )
+    mimo_model: str = Field(
+        default="mimo-v2.5-pro",
+        description="Xiaomi MiMo model name"
+    )
+    mimo_vision_model: str = Field(
+        default="mimo-v2.5",
+        description="Xiaomi MiMo vision-capable model name"
+    )
 
     openrouter_api_key: Optional[str] = Field(
         default=None,
@@ -421,7 +453,7 @@ class Settings(BaseSettings):
     @field_validator("fallback_order")
     @classmethod
     def validate_fallback_order(cls, v: List[str]) -> List[str]:
-        valid_providers = {"gemini", "claude", "openai", "openrouter", "bedrock", "ollama"}
+        valid_providers = {"gemini", "claude", "openai", "deepseek", "mimo", "openrouter", "bedrock", "ollama"}
         for provider in v:
             if provider not in valid_providers:
                 raise ValueError(
@@ -434,9 +466,18 @@ class Settings(BaseSettings):
         """Validate that at least one LLM API key is provided."""
         if "ollama" in [p.lower() for p in self.fallback_order]:
             return
-        if not any([self.gemini_api_key, self.claude_api_key, self.openai_api_key, self.openrouter_api_key, self.aws_access_key_id]):
+        if not any([
+            self.gemini_api_key,
+            self.claude_api_key,
+            self.openai_api_key,
+            self.deepseek_api_key,
+            self.mimo_api_key,
+            self.openrouter_api_key,
+            self.aws_access_key_id,
+        ]):
             raise ValueError(
                 "At least one LLM API key must be provided "
-                "(GEMINI_API_KEY, CLAUDE_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, "
+                "(GEMINI_API_KEY, CLAUDE_API_KEY, OPENAI_API_KEY, "
+                "DEEPSEEK_API_KEY, MIMO_API_KEY, OPENROUTER_API_KEY, "
                 "AWS_ACCESS_KEY_ID, or include ollama in FALLBACK_ORDER)"
             )
