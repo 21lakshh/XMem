@@ -81,6 +81,10 @@ The XMem Chrome extension brings persistent memory to ChatGPT, Claude, Gemini, D
 
 https://github.com/user-attachments/assets/97793cf9-d247-4d02-9c31-3cc9bbbf89aa
 
+### Agent Plugins
+
+The new [plugin/](plugin/) folder brings XMem directly into developer agents and coding assistants. It includes first-party integrations for [Claude Code](plugin/xmem-claude/), [Codex](plugin/xmem-codex/), [Cursor](plugin/xmem-cursor/), [Hermes](plugin/xmem-hermes/), [OpenClaw](plugin/xmem-openclaw/), and [OpenCode](plugin/xmem-opencode/), so agents can search existing memory, save durable project knowledge, and carry context across sessions while keeping API keys in environment variables or client-specific secret stores.
+
 ### Context
 
 Context lets you bring an existing conversation into XMem without manually copy pasting anything.

@@ -79,6 +79,10 @@ XMem Chrome 扩展为 ChatGPT、Claude、Gemini、DeepSeek 和 Perplexity 带来
 
 https://github.com/user-attachments/assets/97793cf9-d247-4d02-9c31-3cc9bbbf89aa
 
+### Agent 插件
+
+新的 [`plugin/`](plugin/) 文件夹将 XMem 直接带入开发者 Agent 和编码助手。它包含 Claude Code、Codex、Cursor、Hermes、OpenClaw 和 OpenCode 的第一方集成，让 Agent 可以搜索已有记忆、保存持久项目知识，并在不同会话之间延续上下文，同时将 API Key 保存在环境变量或客户端专用的密钥存储中。
+
 ### Context
 
 Context 让你无需手动复制粘贴，就能把已有对话带入 XMem。
