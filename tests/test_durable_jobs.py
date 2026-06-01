@@ -165,6 +165,35 @@ def test_terminal_jobs_are_not_overwritten_by_late_workflow_updates():
     assert "error" not in job
 
 
+def test_mark_cancelled_does_not_overwrite_succeeded_job():
+    store = _durable_store_with_doc({
+        "job_id": "job-1",
+        "status": SUCCEEDED,
+        "result": {"ok": True},
+    })
+
+    store.mark_cancelled("job-1")
+
+    job = store.get("job-1")
+    assert job["status"] == SUCCEEDED
+    assert job["result"] == {"ok": True}
+    assert "cancelled_at" not in job
+
+
+def test_reserve_workflow_start_claims_queued_job_once():
+    store = _durable_store_with_doc({
+        "job_id": "job-1",
+        "status": QUEUED,
+        "workflow_id": None,
+    })
+
+    assert store.reserve_workflow_start("job-1", "workflow-1") is True
+    assert store.reserve_workflow_start("job-1", "workflow-2") is False
+
+    job = store.get("job-1")
+    assert job["workflow_id"] == "workflow-1"
+
+
 @pytest.mark.asyncio
 async def test_cancel_job_workflow_reraises_transient_cancel_errors(monkeypatch):
     import importlib.util

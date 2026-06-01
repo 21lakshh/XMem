@@ -19,7 +19,7 @@ from src.api.routes.v2.shared import (
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse, BatchIngestRequest, IngestRequest, ScrapeRequest
 from src.config import settings
-from src.jobs.durable import get_default_job_store, stable_hash
+from src.jobs.durable import QUEUED, get_default_job_store, new_attempt_id, stable_hash
 
 router = APIRouter(
     prefix="/v2/memory",
@@ -57,8 +57,18 @@ async def _enqueue_and_start(
         timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
     )
-    should_start = created or (job.get("status") == "queued" and not job.get("workflow_id"))
+    should_start = created or (job.get("status") == QUEUED and not job.get("workflow_id"))
     if should_start:
+        workflow_id = job.get("workflow_id") or f"{job['job_id']}:{new_attempt_id()}"
+        reserved = await asyncio.to_thread(
+            store.reserve_workflow_start,
+            job["job_id"],
+            workflow_id,
+        )
+        job = await asyncio.to_thread(store.get, job["job_id"]) or job
+    else:
+        reserved = False
+    if reserved:
         try:
             await start_job_workflow(job)
         except Exception as exc:

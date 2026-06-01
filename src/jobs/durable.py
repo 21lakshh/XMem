@@ -209,6 +209,18 @@ class DurableJobStore:
             },
         )
 
+    def reserve_workflow_start(self, job_id: str, workflow_id: str) -> bool:
+        result = self.jobs.update_one(
+            {"job_id": job_id, "status": QUEUED, "workflow_id": None},
+            {
+                "$set": {
+                    "workflow_id": workflow_id,
+                    "updated_at": utc_now(),
+                },
+            },
+        )
+        return getattr(result, "modified_count", 0) == 1
+
     def mark_running(self, job_id: str) -> None:
         now = utc_now()
         job = self.jobs.find_one_and_update(
@@ -282,7 +294,7 @@ class DurableJobStore:
     def mark_cancelled(self, job_id: str) -> None:
         now = utc_now()
         self.jobs.update_one(
-            {"job_id": job_id},
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
             {
                 "$set": {
                     "status": CANCELLED,
