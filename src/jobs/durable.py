@@ -128,6 +128,9 @@ class DurableJobStore:
         self.jobs.create_index([("user_id", 1), ("updated_at", -1)])
         self.jobs.create_index([("status", 1), ("updated_at", 1)])
         self.jobs.create_index([("workflow_id", 1)])
+        secrets = self.get_collection("durable_job_secrets")
+        secrets.create_index([("secret_ref", 1)], unique=True)
+        secrets.create_index([("job_id", 1)])
 
     def get_collection(self, name: str):
         return self._db[name]

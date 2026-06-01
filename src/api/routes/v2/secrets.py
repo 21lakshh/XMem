@@ -34,8 +34,6 @@ def _collection():
     collection = get_collection("durable_job_secrets")
     if collection is None:
         return None
-    collection.create_index([("secret_ref", 1)], unique=True)
-    collection.create_index([("job_id", 1)])
     return collection
 
 

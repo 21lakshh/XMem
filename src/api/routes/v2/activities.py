@@ -142,14 +142,6 @@ async def memory_run_pipeline_activity(payload: Dict[str, Any]) -> Dict[str, Any
 
 
 @activity.defn
-async def memory_batch_ingest_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    results = []
-    for item in payload["items"]:
-        results.append(await memory_v1._run_ingest_payload(item, item["user_id"]))
-    return {"results": results}
-
-
-@activity.defn
 async def memory_scrape_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     def _run_scrape() -> Dict[str, Any]:
         html, final_url = memory_v1._render_chat_share_sync(payload["url"])
@@ -189,7 +181,7 @@ async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["github_url"],
         payload.get("branch") or "main",
         pat,
-        bool(payload.get("force_full", True)),
+        bool(payload.get("force_full", False)),
     )
     job = scanner_v1._get_code_store().get_scanner_job(payload["scanner_job_id"]) or {}
     return {
@@ -227,7 +219,6 @@ ALL_ACTIVITIES = [
     memory_classify_activity,
     memory_domain_activity,
     memory_run_pipeline_activity,
-    memory_batch_ingest_activity,
     memory_scrape_activity,
     scanner_scan_activity,
     scanner_phase2_activity,

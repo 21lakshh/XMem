@@ -198,11 +198,34 @@ class MemoryBatchIngestWorkflow:
         payload = input["payload"]
         try:
             await _execute("mark_job_running_activity", job_id, 30)
-            result = await _execute(
-                "memory_batch_ingest_activity",
-                payload,
-                float(payload.get("timeout_seconds") or 3600.0),
-            )
+            items = list(payload.get("items") or [])
+            total_timeout = float(payload.get("timeout_seconds") or 3600.0)
+            item_timeout = max(total_timeout / max(len(items), 1), 1.0)
+            results = []
+            for index, item in enumerate(items):
+                item_payload = dict(item)
+                item_payload["user_id"] = (
+                    item_payload.get("user_id") or payload["user_id"]
+                )
+                item_result = await _execute(
+                    "memory_run_pipeline_activity",
+                    item_payload,
+                    item_timeout,
+                )
+                results.append(item_result)
+                await _execute(
+                    "mark_job_progress_activity",
+                    {
+                        "job_id": job_id,
+                        "progress": {
+                            "step": "batch_ingest",
+                            "completed": index + 1,
+                            "total": len(items),
+                        },
+                    },
+                    30,
+                )
+            result = {"results": results}
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
         except CancelledError:
