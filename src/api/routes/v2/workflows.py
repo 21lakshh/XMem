@@ -261,7 +261,9 @@ class ScannerScanWorkflow:
         job_id = input["job_id"]
         try:
             await _execute("mark_job_running_activity", job_id, 30)
-            result = await _execute("scanner_scan_activity", input["payload"], 1800)
+            activity_payload = dict(input["payload"])
+            activity_payload["durable_job_id"] = job_id
+            result = await _execute("scanner_scan_activity", activity_payload, 1800)
             await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
             return result
         except CancelledError:

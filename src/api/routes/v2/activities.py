@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
@@ -172,7 +173,13 @@ async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     from src.api.routes import scanner as scanner_v1
     from src.api.routes.v2.secrets import resolve_scanner_pat
 
-    pat = await asyncio.to_thread(resolve_scanner_pat, payload.get("github_credential_ref") or "")
+    try:
+        pat = await asyncio.to_thread(resolve_scanner_pat, payload.get("github_credential_ref") or "")
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        await asyncio.to_thread(_mark_scanner_scan_failed, scanner_v1, payload, error)
+        raise
+
     await scanner_v1._run_scan_job(
         payload["scanner_job_id"],
         payload["username"],
@@ -189,6 +196,27 @@ async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         "phase1_status": job.get("phase1_status"),
         "phase2_status": job.get("phase2_status"),
     }
+
+
+def _mark_scanner_scan_failed(scanner_v1, payload: Dict[str, Any], error: str) -> None:
+    store = scanner_v1._get_code_store()
+    scanner_job_id = payload["scanner_job_id"]
+    existing = store.get_scanner_job(scanner_job_id) or {}
+    store.upsert_scanner_job(
+        job_id=scanner_job_id,
+        username=payload["username"],
+        org=payload["org"],
+        repo=payload["repo"],
+        branch=payload.get("branch") or existing.get("branch") or "main",
+        url=payload.get("github_url") or existing.get("url") or "",
+        phase1_status="failed",
+        phase2_status=existing.get("phase2_status", "pending"),
+        started_at=float(existing.get("started_at") or time.time()),
+        error=error,
+        durable_job_id=payload.get("durable_job_id") or existing.get("durable_job_id"),
+        retry_count=int(existing.get("retry_count") or 0),
+        timeout_seconds=existing.get("timeout_seconds"),
+    )
 
 
 @activity.defn
