@@ -392,106 +392,107 @@ class BillingStore:
 
         from pymongo import ReturnDocument
 
-        if existing:
-            if existing.get("billing_account_id") != account_id:
-                raise BillingStoreError(
-                    f"Reservation for job {job_id} belongs to a different billing account"
-                )
-            reserved_doc = self.reservations.find_one_and_update(
-                {
-                    "job_id": job_id,
-                    "billing_account_id": account_id,
-                    "status": {"$nin": ["active", "committed", "reserving"]},
-                },
-                {
-                    "$set": {
-                        "status": "reserving",
-                        "reserved_credits": amount,
-                        "metadata": metadata or {},
-                        "updated_at": now,
-                    },
-                    "$inc": {"version": 1},
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-            if not reserved_doc:
+        try:
+            with self._client.start_session() as session:
+                with session.start_transaction():
+                    current = self.reservations.find_one({"job_id": job_id}, session=session)
+                    if current:
+                        current = _without_id(current) or {}
+                        if current.get("billing_account_id") != account_id:
+                            raise BillingStoreError(
+                                f"Reservation for job {job_id} belongs to a different billing account"
+                            )
+                        if current.get("status") in {"active", "committed"}:
+                            return {**current, "created": False}
+                        if current.get("status") == "reserving":
+                            raise BillingStoreError(
+                                f"Reservation for job {job_id} is already being created"
+                            )
+                        reserved_doc = self.reservations.find_one_and_update(
+                            {
+                                "job_id": job_id,
+                                "billing_account_id": account_id,
+                                "status": {"$nin": ["active", "committed", "reserving"]},
+                            },
+                            {
+                                "$set": {
+                                    "status": "reserving",
+                                    "reserved_credits": amount,
+                                    "metadata": metadata or {},
+                                    "updated_at": now,
+                                },
+                                "$inc": {"version": 1},
+                            },
+                            return_document=ReturnDocument.AFTER,
+                            session=session,
+                        )
+                        if not reserved_doc:
+                            raise BillingStoreError(f"Reservation for job {job_id} is already active")
+                        reservation = _without_id(reserved_doc) or {}
+                        version = int(reservation.get("version") or 1)
+                    else:
+                        reservation = {
+                            "id": uuid.uuid4().hex,
+                            "billing_account_id": account_id,
+                            "job_id": job_id,
+                            "reserved_credits": amount,
+                            "status": "reserving",
+                            "version": 1,
+                            "metadata": metadata or {},
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        self.reservations.insert_one(reservation, session=session)
+                        version = 1
+
+                    wallet = self.wallets.find_one_and_update(
+                        {"billing_account_id": account_id, "available_credits": {"$gte": amount}},
+                        {
+                            "$inc": {"available_credits": -amount, "reserved_credits": amount},
+                            "$set": {"updated_at": now},
+                        },
+                        return_document=True,
+                        session=session,
+                    )
+                    if not wallet:
+                        current_wallet = self.wallets.find_one(
+                            {"billing_account_id": account_id},
+                            session=session,
+                        ) or {}
+                        raise InsufficientCredits(
+                            amount,
+                            int(current_wallet.get("available_credits") or 0),
+                        )
+
+                    self.reservations.update_one(
+                        {"job_id": job_id, "billing_account_id": account_id, "status": "reserving"},
+                        {"$set": {"status": "active", "updated_at": now}},
+                        session=session,
+                    )
+                    self.ledger.insert_one(
+                        {
+                            "id": uuid.uuid4().hex,
+                            "billing_account_id": account_id,
+                            "type": "reserve",
+                            "amount": amount,
+                            "job_id": job_id,
+                            "idempotency_key": f"reserve:{job_id}:{version}",
+                            "metadata": metadata or {},
+                            "created_at": now,
+                        },
+                        session=session,
+                    )
+        except Exception as exc:
+            if _is_duplicate_key_error(exc):
                 current = self.get_reservation(job_id)
                 if (
                     current
                     and current.get("billing_account_id") == account_id
-                    and current.get("status") != "reserving"
+                    and current.get("status") in {"active", "committed"}
                 ):
                     return {**current, "created": False}
-                raise BillingStoreError(f"Reservation for job {job_id} is already active")
-            reservation = _without_id(reserved_doc) or {}
-            version = int(reservation.get("version") or 1)
-        else:
-            reservation = {
-                "id": uuid.uuid4().hex,
-                "billing_account_id": account_id,
-                "job_id": job_id,
-                "reserved_credits": amount,
-                "status": "reserving",
-                "version": 1,
-                "metadata": metadata or {},
-                "created_at": now,
-                "updated_at": now,
-            }
-            try:
-                self.reservations.insert_one(reservation)
-            except Exception as exc:
-                if not _is_duplicate_key_error(exc):
-                    raise
-                current = self.get_reservation(job_id)
-                if (
-                    current
-                    and current.get("billing_account_id") == account_id
-                    and current.get("status") != "reserving"
-                ):
-                    return {**current, "created": False}
-                if current and current.get("billing_account_id") == account_id:
-                    raise BillingStoreError(
-                        f"Reservation for job {job_id} is already being created"
-                    ) from exc
-                raise BillingStoreError(
-                    f"Reservation for job {job_id} belongs to a different billing account"
-                ) from exc
-            version = 1
-
-        wallet = self.wallets.find_one_and_update(
-            {"billing_account_id": account_id, "available_credits": {"$gte": amount}},
-            {
-                "$inc": {"available_credits": -amount, "reserved_credits": amount},
-                "$set": {"updated_at": now},
-            },
-            return_document=True,
-        )
-        if not wallet:
-            self.reservations.update_one(
-                {"job_id": job_id, "status": "reserving"},
-                {"$set": {"status": "released", "updated_at": now}},
-            )
-            current = self.get_wallet(account_id)
-            raise InsufficientCredits(amount, int(current.get("available_credits") or 0))
-
-        self.reservations.update_one(
-            {"job_id": job_id, "billing_account_id": account_id, "status": "reserving"},
-            {"$set": {"status": "active", "updated_at": now}},
-        )
-        reservation = self.get_reservation(job_id) or reservation
-        self._insert_ledger(
-            {
-                "id": uuid.uuid4().hex,
-                "billing_account_id": account_id,
-                "type": "reserve",
-                "amount": amount,
-                "job_id": job_id,
-                "idempotency_key": f"reserve:{job_id}:{version}",
-                "metadata": metadata or {},
-                "created_at": now,
-            }
-        )
-        return {**reservation, "created": True}
+            raise
+        return {**reservation, "status": "active", "updated_at": now, "created": True}
 
     def get_reservation(self, job_id: str) -> Optional[dict[str, Any]]:
         if self._in_memory:
@@ -705,27 +706,46 @@ class BillingStore:
         else:
             from pymongo import ReturnDocument
 
-            reservation_doc = self.reservations.find_one_and_update(
-                {"job_id": job_id, "billing_account_id": account_id, "status": "active"},
-                {"$set": {"status": "released", "updated_at": now}},
-                return_document=ReturnDocument.BEFORE,
-            )
-            if not reservation_doc:
-                current = self.get_reservation(job_id)
-                if current and current.get("billing_account_id") != account_id:
-                    raise BillingStoreError(
-                        f"Reservation for job {job_id} belongs to a different billing account"
+            with self._client.start_session() as session:
+                with session.start_transaction():
+                    reservation_doc = self.reservations.find_one_and_update(
+                        {"job_id": job_id, "billing_account_id": account_id, "status": "active"},
+                        {"$set": {"status": "released", "updated_at": now}},
+                        return_document=ReturnDocument.BEFORE,
+                        session=session,
                     )
-                return current
-            reservation = _without_id(reservation_doc) or {}
-            amount = int(reservation.get("reserved_credits") or 0)
-            self.wallets.update_one(
-                {"billing_account_id": account_id},
-                {
-                    "$inc": {"available_credits": amount, "reserved_credits": -amount},
-                    "$set": {"updated_at": now},
-                },
-            )
+                    if not reservation_doc:
+                        current = self.reservations.find_one({"job_id": job_id}, session=session)
+                        current = _without_id(current)
+                        if current and current.get("billing_account_id") != account_id:
+                            raise BillingStoreError(
+                                f"Reservation for job {job_id} belongs to a different billing account"
+                            )
+                        return current
+                    reservation = _without_id(reservation_doc) or {}
+                    amount = int(reservation.get("reserved_credits") or 0)
+                    self.wallets.update_one(
+                        {"billing_account_id": account_id},
+                        {
+                            "$inc": {"available_credits": amount, "reserved_credits": -amount},
+                            "$set": {"updated_at": now},
+                        },
+                        session=session,
+                    )
+                    self.ledger.insert_one(
+                        {
+                            "id": uuid.uuid4().hex,
+                            "billing_account_id": account_id,
+                            "type": "release",
+                            "amount": amount,
+                            "job_id": job_id,
+                            "idempotency_key": f"release:{job_id}:{reservation.get('version', 1)}",
+                            "metadata": metadata or {},
+                            "created_at": now,
+                        },
+                        session=session,
+                    )
+            return self.get_reservation(job_id)
         self._insert_ledger(
             {
                 "id": uuid.uuid4().hex,
