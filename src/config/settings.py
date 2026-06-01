@@ -68,6 +68,18 @@ class Settings(BaseSettings):
         default="deepseek-v4-flash",
         description="DeepSeek vision model name"
     )
+    groq_api_key: Optional[str] = Field(
+        default=None,
+        description="Groq API key"
+    )
+    groq_model: str = Field(
+        default="llama-3.3-70b-versatile",
+        description="Groq model name"
+    )
+    groq_vision_model: str = Field(
+        default="llama-3.2-11b-vision-preview",
+        description="Groq vision-capable model name"
+    )
     mimo_api_key: Optional[str] = Field(
         default=None,
         description="Xiaomi MiMo API key"
@@ -493,7 +505,7 @@ class Settings(BaseSettings):
     @field_validator("fallback_order")
     @classmethod
     def validate_fallback_order(cls, v: List[str]) -> List[str]:
-        valid_providers = {"gemini", "claude", "openai", "deepseek", "mimo", "openrouter", "bedrock", "ollama"}
+        valid_providers = {"gemini", "claude", "openai", "deepseek", "groq", "mimo", "openrouter", "bedrock", "ollama"}
         for provider in v:
             if provider not in valid_providers:
                 raise ValueError(
