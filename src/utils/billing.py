@@ -45,6 +45,17 @@ RESERVATION_BUFFER_MULTIPLIER = 1.25
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 TOP_UP_EXPIRY_DAYS = 365
 
+# Provider usage is priced in USD, while XMem sells credits in INR through
+# Razorpay. These defaults keep one XMem credit close to the current Pro/top-up
+# value: Rs.99 / 5,000 credits = 1.98 paise per credit.
+USD_TO_INR_RATE = 85.0
+CREDIT_VALUE_PAISE = 2.0
+
+# Revenue charged to users as a multiple of raw provider cost. A value of 2.0
+# means 50% gross margin before non-LLM infrastructure costs.
+MODEL_COST_MARKUP_MULTIPLIER = 2.0
+MIN_MODEL_USAGE_CREDITS = 1
+
 
 def estimate_tokens(text: str) -> int:
     """Approximate billable tokens when provider usage is not available."""

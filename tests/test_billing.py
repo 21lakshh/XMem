@@ -9,7 +9,12 @@ import pytest
 
 from src.billing import store as billing_store
 from src.billing.service import BillingService
-from src.billing.store import BillingStore, BillingStoreError, InsufficientCredits, utc_now
+from src.billing.store import (
+    BillingStore,
+    BillingStoreError,
+    InsufficientCredits,
+    utc_now,
+)
 from src.utils import billing as billing_config
 
 
@@ -182,6 +187,52 @@ def test_billing_config_changes_affect_estimates(monkeypatch):
     changed = svc.estimate_required_credits("memory_ingest", payload)
 
     assert changed.billable_credits == baseline.billable_credits * 2
+
+
+def test_commit_job_billing_prefers_actual_priced_provider_usage():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+    svc.reserve_credits(account["id"], "job_1", 1000)
+    response = type(
+        "Response",
+        (),
+        {
+            "usage_metadata": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "total_tokens": 1500,
+            },
+            "response_metadata": {},
+        },
+    )()
+    svc.record_model_usage(
+        billing_account_id=account["id"],
+        job_id="job_1",
+        provider="openai",
+        model="gpt-4.1-mini",
+        agent="classifier",
+        response=response,
+    )
+
+    result = svc.commit_job_billing(
+        {
+            "job_id": "job_1",
+            "job_type": "memory_ingest",
+            "payload": {
+                "billing_account_id": account["id"],
+                "user_query": "a" * 4000,
+                "agent_response": "",
+            },
+        },
+        {},
+    )
+
+    summary = svc.get_billing_summary(user)
+    assert result["billing"]["source"] == "provider_usage"
+    assert result["billing"]["billable_credits"] == 11
+    assert summary.available_credits == 9989
+    assert summary.reserved_credits == 0
 
 
 def test_missing_payment_event_id_is_rejected():

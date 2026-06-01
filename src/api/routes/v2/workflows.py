@@ -8,6 +8,7 @@ try:  # pragma: no cover - fallback makes app imports independent of SDK install
     from temporalio.common import RetryPolicy
     from temporalio.exceptions import CancelledError
 except Exception:  # pragma: no cover
+
     class CancelledError(BaseException):  # type: ignore[no-redef]
         pass
 
@@ -95,15 +96,29 @@ class MemoryIngestWorkflow:
     async def run(self, input: Dict[str, Any]) -> Dict[str, Any]:
         job_id = input["job_id"]
         payload = input["payload"]
+        billing_activity = {
+            "billing_job_id": job_id,
+            "billing_account_id": payload.get("billing_account_id"),
+        }
         timeout = float(payload.get("timeout_seconds") or 120.0)
         try:
             await _execute("mark_job_running_activity", job_id, 30)
             if payload.get("effort_level") == "high":
-                result = await _execute("memory_run_pipeline_activity", payload, timeout)
-                await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+                result = await _execute(
+                    "memory_run_pipeline_activity",
+                    {**payload, **billing_activity},
+                    timeout,
+                )
+                await _execute(
+                    "mark_job_succeeded_activity",
+                    {"job_id": job_id, "result": result},
+                    30,
+                )
                 return result
 
-            classified = await _execute("memory_classify_activity", payload, timeout)
+            classified = await _execute(
+                "memory_classify_activity", {**payload, **billing_activity}, timeout
+            )
             classifications = classified.get("classification") or []
             routes = _routes(classifications)
             result: Dict[str, Any] = {
@@ -117,7 +132,13 @@ class MemoryIngestWorkflow:
             }
             await _execute(
                 "mark_job_progress_activity",
-                {"job_id": job_id, "progress": {"step": "classified", "classification_count": len(classifications)}},
+                {
+                    "job_id": job_id,
+                    "progress": {
+                        "step": "classified",
+                        "classification_count": len(classifications),
+                    },
+                },
                 30,
             )
 
@@ -127,6 +148,7 @@ class MemoryIngestWorkflow:
                     {
                         "domain": "summary",
                         "user_id": payload["user_id"],
+                        **billing_activity,
                         "user_query": payload.get("user_query", ""),
                         "agent_response": payload.get("agent_response", ""),
                     },
@@ -137,7 +159,12 @@ class MemoryIngestWorkflow:
             if routes["profile"]:
                 profile = await _execute(
                     "memory_domain_activity",
-                    {"domain": "profile", "user_id": payload["user_id"], "queries": routes["profile"]},
+                    {
+                        "domain": "profile",
+                        "user_id": payload["user_id"],
+                        "queries": routes["profile"],
+                        **billing_activity,
+                    },
                     timeout,
                 )
                 result["profile"] = profile.get("result")
@@ -148,6 +175,7 @@ class MemoryIngestWorkflow:
                     {
                         "domain": "temporal",
                         "user_id": payload["user_id"],
+                        **billing_activity,
                         "queries": routes["temporal"],
                         "session_datetime": payload.get("session_datetime", ""),
                     },
@@ -161,7 +189,9 @@ class MemoryIngestWorkflow:
                     {
                         "domain": "image",
                         "user_id": payload["user_id"],
-                        "classifier_output": " ".join(routes["image"]) or "Analyze this image for memory-relevant details.",
+                        **billing_activity,
+                        "classifier_output": " ".join(routes["image"])
+                        or "Analyze this image for memory-relevant details.",
                         "image_url": payload.get("image_url", ""),
                     },
                     timeout,
@@ -171,12 +201,19 @@ class MemoryIngestWorkflow:
             if routes["code"]:
                 code = await _execute(
                     "memory_domain_activity",
-                    {"domain": "snippet", "user_id": payload["user_id"], "queries": routes["code"]},
+                    {
+                        "domain": "snippet",
+                        "user_id": payload["user_id"],
+                        "queries": routes["code"],
+                        **billing_activity,
+                    },
                     timeout,
                 )
                 result["code"] = code
 
-            await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+            await _execute(
+                "mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30
+            )
             return result
         except CancelledError:
             raise
@@ -190,6 +227,10 @@ class MemoryBatchIngestWorkflow:
     async def run(self, input: Dict[str, Any]) -> Dict[str, Any]:
         job_id = input["job_id"]
         payload = input["payload"]
+        billing_activity = {
+            "billing_job_id": job_id,
+            "billing_account_id": payload.get("billing_account_id"),
+        }
         try:
             await _execute("mark_job_running_activity", job_id, 30)
             items = list(payload.get("items") or [])
@@ -201,6 +242,7 @@ class MemoryBatchIngestWorkflow:
                 item_payload["user_id"] = (
                     item_payload.get("user_id") or payload["user_id"]
                 )
+                item_payload.update(billing_activity)
                 item_result = await _execute(
                     "memory_run_pipeline_activity",
                     item_payload,
@@ -220,7 +262,9 @@ class MemoryBatchIngestWorkflow:
                     30,
                 )
             result = {"results": results}
-            await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+            await _execute(
+                "mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30
+            )
             return result
         except CancelledError:
             raise
@@ -236,7 +280,9 @@ class MemoryScrapeWorkflow:
         try:
             await _execute("mark_job_running_activity", job_id, 30)
             result = await _execute("memory_scrape_activity", input["payload"], 60)
-            await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+            await _execute(
+                "mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30
+            )
             return result
         except CancelledError:
             raise
@@ -254,7 +300,9 @@ class ScannerScanWorkflow:
             activity_payload = dict(input["payload"])
             activity_payload["durable_job_id"] = job_id
             result = await _execute("scanner_scan_activity", activity_payload, 1800)
-            await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+            await _execute(
+                "mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30
+            )
             return result
         except CancelledError:
             raise
@@ -270,7 +318,9 @@ class ScannerPhase2Workflow:
         try:
             await _execute("mark_job_running_activity", job_id, 30)
             result = await _execute("scanner_phase2_activity", input["payload"], 1800)
-            await _execute("mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30)
+            await _execute(
+                "mark_job_succeeded_activity", {"job_id": job_id, "result": result}, 30
+            )
             return result
         except CancelledError:
             raise

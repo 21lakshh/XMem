@@ -5,8 +5,21 @@ from datetime import timedelta
 from typing import Any, Mapping, Optional
 
 from src.billing.metering import estimate_required_credits as _estimate_required_credits
+from src.billing.pricing import (
+    CostBreakdown,
+    ModelUsage,
+    UsageCostCalculator,
+    UsageNormalizer,
+)
 from src.billing.store import BillingStore, get_default_billing_store, utc_now
-from src.billing.types import BillingSummary, CreditEstimate, CreditLotPublic, PlanPublic, ReservationResult, TopUpPackPublic
+from src.billing.types import (
+    BillingSummary,
+    CreditEstimate,
+    CreditLotPublic,
+    PlanPublic,
+    ReservationResult,
+    TopUpPackPublic,
+)
 from src.utils import billing as billing_config
 
 logger = logging.getLogger("xmem.billing.service")
@@ -50,6 +63,8 @@ def public_topups() -> list[TopUpPackPublic]:
 class BillingService:
     def __init__(self, store: Optional[BillingStore] = None) -> None:
         self.store = store or get_default_billing_store()
+        self.usage_normalizer = UsageNormalizer()
+        self.cost_calculator = UsageCostCalculator()
 
     def ensure_billing_account(self, user: Mapping[str, Any]) -> dict[str, Any]:
         owner_id = _user_id(user)
@@ -156,37 +171,60 @@ class BillingService:
             metadata=metadata,
         )
 
-    def commit_job_billing(self, job: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    def commit_job_billing(
+        self, job: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> dict[str, Any]:
         payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
         account_id = payload.get("billing_account_id")
         if not account_id:
             return dict(result)
-        job_type = str(job.get("job_type") or payload.get("job_type") or "memory_ingest")
-        estimate = self.estimate_required_credits(
-            job_type,
-            payload,
-            include_reservation_buffer=False,
+        job_type = str(
+            job.get("job_type") or payload.get("job_type") or "memory_ingest"
         )
+        cost_breakdown = self.usage_cost_for_job(str(account_id), str(job["job_id"]))
+        estimate = None
+        if cost_breakdown and cost_breakdown.charged_credits > 0:
+            final_credits = cost_breakdown.charged_credits
+        else:
+            estimate = self.estimate_required_credits(
+                job_type,
+                payload,
+                include_reservation_buffer=False,
+            )
+            final_credits = estimate.billable_credits
         self.commit_job_debit(
             str(account_id),
             str(job["job_id"]),
-            estimate.billable_credits,
+            final_credits,
             metadata={
                 "job_type": job_type,
-                "content_tokens": estimate.content_tokens,
-                "multiplier": estimate.multiplier,
+                "billing_source": "provider_usage" if cost_breakdown else "estimate",
+                **(
+                    {"provider_cost": cost_breakdown.model_dump()}
+                    if cost_breakdown
+                    else {
+                        "content_tokens": estimate.content_tokens if estimate else 0,
+                        "multiplier": estimate.multiplier if estimate else 0,
+                    }
+                ),
             },
         )
         enriched = dict(result)
         enriched["billing"] = {
             "billing_account_id": account_id,
-            "billable_credits": estimate.billable_credits,
-            "content_tokens": estimate.content_tokens,
-            "multiplier": estimate.multiplier,
+            "billable_credits": final_credits,
+            "source": "provider_usage" if cost_breakdown else "estimate",
         }
+        if cost_breakdown:
+            enriched["billing"]["provider_cost"] = cost_breakdown.model_dump()
+        elif estimate:
+            enriched["billing"]["content_tokens"] = estimate.content_tokens
+            enriched["billing"]["multiplier"] = estimate.multiplier
         return enriched
 
-    def release_job_billing(self, job: Mapping[str, Any], reason: str = "job_not_completed") -> None:
+    def release_job_billing(
+        self, job: Mapping[str, Any], reason: str = "job_not_completed"
+    ) -> None:
         payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
         account_id = payload.get("billing_account_id")
         if not account_id:
@@ -242,7 +280,11 @@ class BillingService:
             source=pack_id,
             expires_at=utc_now() + timedelta(days=billing_config.TOP_UP_EXPIRY_DAYS),
             idempotency_key=f"topup_grant:{order_id}:{payment_id}",
-            metadata={"payment_id": payment_id, "order_id": order_id, "pack_id": pack_id},
+            metadata={
+                "payment_id": payment_id,
+                "order_id": order_id,
+                "pack_id": pack_id,
+            },
         )
 
     def get_billing_summary(self, user: Mapping[str, Any]) -> BillingSummary:
@@ -274,12 +316,86 @@ class BillingService:
             credit_lots=lots,
         )
 
-    def list_ledger(self, user: Mapping[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+    def list_ledger(
+        self, user: Mapping[str, Any], limit: int = 100
+    ) -> list[dict[str, Any]]:
         account = self.ensure_billing_account(user)
         return self.store.list_ledger(account["id"], limit=limit)
 
     def record_usage_event(self, **event: Any) -> None:
         self.store.record_usage_event(event)
+
+    def record_model_usage(
+        self,
+        *,
+        billing_account_id: str,
+        job_id: str,
+        provider: str,
+        model: str,
+        agent: str,
+        response: Any,
+        latency_ms: float = 0.0,
+        user_id: str = "",
+    ) -> None:
+        usage = self.usage_normalizer.normalize(
+            provider=provider,
+            model=model,
+            agent=agent,
+            response=response,
+        )
+        cost = self.cost_calculator.calculate(usage)
+        self.record_usage_event(
+            billing_account_id=billing_account_id,
+            job_id=job_id,
+            user_id=user_id,
+            provider=usage.provider,
+            model=usage.model,
+            agent=usage.agent,
+            latency_ms=latency_ms,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            thinking_tokens=usage.thinking_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            total_tokens=usage.total_tokens,
+            raw_usage=usage.raw_usage,
+            raw_response_metadata=usage.raw_response_metadata,
+            cost=cost.model_dump() if cost else None,
+            priced=cost is not None,
+        )
+
+    def usage_cost_for_job(
+        self, account_id: str, job_id: str
+    ) -> Optional[CostBreakdown]:
+        events = self.store.list_usage_events(account_id=account_id, job_id=job_id)
+        breakdowns: list[CostBreakdown] = []
+        for event in events:
+            cost = event.get("cost") or {}
+            if not cost:
+                usage = ModelUsage(
+                    provider=str(event.get("provider") or "unknown"),
+                    model=str(event.get("model") or "unknown"),
+                    agent=str(event.get("agent") or ""),
+                    input_tokens=int(event.get("input_tokens") or 0),
+                    output_tokens=int(event.get("output_tokens") or 0),
+                    thinking_tokens=int(event.get("thinking_tokens") or 0),
+                    cached_input_tokens=int(event.get("cached_input_tokens") or 0),
+                    cache_creation_input_tokens=int(
+                        event.get("cache_creation_input_tokens") or 0
+                    ),
+                    total_tokens=int(event.get("total_tokens") or 0),
+                )
+                calculated = self.cost_calculator.calculate(usage)
+                if calculated:
+                    breakdowns.append(calculated)
+                continue
+            try:
+                breakdowns.append(CostBreakdown(**cost))
+            except TypeError:
+                continue
+        if not breakdowns:
+            return None
+        return self.cost_calculator.aggregate(breakdowns)
 
 
 _default_service: Optional[BillingService] = None
@@ -296,12 +412,18 @@ def ensure_billing_account(user: Mapping[str, Any]) -> dict[str, Any]:
     return get_default_billing_service().ensure_billing_account(user)
 
 
-def estimate_required_credits(job_type: str, payload: Mapping[str, Any]) -> CreditEstimate:
+def estimate_required_credits(
+    job_type: str, payload: Mapping[str, Any]
+) -> CreditEstimate:
     return get_default_billing_service().estimate_required_credits(job_type, payload)
 
 
-def reserve_credits(account_id: str, job_id: str, estimated_credits: int) -> ReservationResult:
-    return get_default_billing_service().reserve_credits(account_id, job_id, estimated_credits)
+def reserve_credits(
+    account_id: str, job_id: str, estimated_credits: int
+) -> ReservationResult:
+    return get_default_billing_service().reserve_credits(
+        account_id, job_id, estimated_credits
+    )
 
 
 def reserve_job_credits(
@@ -319,19 +441,27 @@ def reserve_job_credits(
     )
 
 
-def commit_job_debit(account_id: str, job_id: str, final_credits: int) -> dict[str, Any]:
-    return get_default_billing_service().commit_job_debit(account_id, job_id, final_credits)
+def commit_job_debit(
+    account_id: str, job_id: str, final_credits: int
+) -> dict[str, Any]:
+    return get_default_billing_service().commit_job_debit(
+        account_id, job_id, final_credits
+    )
 
 
 def release_job_reservation(account_id: str, job_id: str) -> Optional[dict[str, Any]]:
     return get_default_billing_service().release_job_reservation(account_id, job_id)
 
 
-def commit_job_billing(job: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+def commit_job_billing(
+    job: Mapping[str, Any], result: Mapping[str, Any]
+) -> dict[str, Any]:
     return get_default_billing_service().commit_job_billing(job, result)
 
 
-def release_job_billing(job: Mapping[str, Any], reason: str = "job_not_completed") -> None:
+def release_job_billing(
+    job: Mapping[str, Any], reason: str = "job_not_completed"
+) -> None:
     get_default_billing_service().release_job_billing(job, reason)
 
 
@@ -341,3 +471,7 @@ def get_billing_summary(user: Mapping[str, Any]) -> BillingSummary:
 
 def record_usage_event(**event: Any) -> None:
     get_default_billing_service().record_usage_event(**event)
+
+
+def record_model_usage(**event: Any) -> None:
+    get_default_billing_service().record_model_usage(**event)

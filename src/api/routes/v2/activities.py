@@ -9,12 +9,14 @@ from fastapi.encoders import jsonable_encoder
 
 from src.api.dependencies import get_ingest_pipeline
 from src.api.routes import memory as memory_v1
+from src.billing.context import use_billing_context
 from src.billing.service import commit_job_billing, release_job_billing
 from src.jobs.durable import get_default_job_store
 
 try:  # pragma: no cover - no-op fallback keeps imports working without SDK.
     from temporalio import activity
 except Exception:  # pragma: no cover
+
     class _ActivityFallback:
         def defn(self, fn=None, **_kwargs):
             if fn is None:
@@ -81,7 +83,12 @@ async def memory_classify_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         "user_query": payload.get("user_query", ""),
         "image_url": payload.get("image_url", ""),
     }
-    result = await pipeline._node_classify(state)
+    with use_billing_context(
+        job_id=payload.get("billing_job_id") or payload.get("job_id"),
+        billing_account_id=payload.get("billing_account_id"),
+        user_id=payload.get("user_id", ""),
+    ):
+        result = await pipeline._node_classify(state)
     classification = result.get("classification_result")
     return {
         "model": memory_v1._model_name(pipeline.model),
@@ -97,57 +104,79 @@ async def memory_domain_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     domain = payload["domain"]
     user_id = payload["user_id"]
 
-    if domain == "profile":
-        result = await pipeline._node_extract_profile({
-            "profile_queries": payload.get("queries", []),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "result": _domain_payload(result, "profile")}
+    with use_billing_context(
+        job_id=payload.get("billing_job_id") or payload.get("job_id"),
+        billing_account_id=payload.get("billing_account_id"),
+        user_id=user_id,
+    ):
+        if domain == "profile":
+            result = await pipeline._node_extract_profile(
+                {
+                    "profile_queries": payload.get("queries", []),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "result": _domain_payload(result, "profile")}
 
-    if domain == "temporal":
-        result = await pipeline._node_extract_temporal({
-            "temporal_queries": payload.get("queries", []),
-            "session_datetime": payload.get("session_datetime", ""),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "result": _domain_payload(result, "temporal")}
+        if domain == "temporal":
+            result = await pipeline._node_extract_temporal(
+                {
+                    "temporal_queries": payload.get("queries", []),
+                    "session_datetime": payload.get("session_datetime", ""),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "result": _domain_payload(result, "temporal")}
 
-    if domain == "summary":
-        result = await pipeline._node_extract_summary({
-            "user_query": payload.get("user_query", ""),
-            "agent_response": payload.get("agent_response", ""),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "result": _domain_payload(result, "summary")}
+        if domain == "summary":
+            result = await pipeline._node_extract_summary(
+                {
+                    "user_query": payload.get("user_query", ""),
+                    "agent_response": payload.get("agent_response", ""),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "result": _domain_payload(result, "summary")}
 
-    if domain == "image":
-        result = await pipeline._node_extract_image({
-            "classifier_output": payload.get("classifier_output", ""),
-            "image_url": payload.get("image_url", ""),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "result": _domain_payload(result, "image")}
+        if domain == "image":
+            result = await pipeline._node_extract_image(
+                {
+                    "classifier_output": payload.get("classifier_output", ""),
+                    "image_url": payload.get("image_url", ""),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "result": _domain_payload(result, "image")}
 
-    if domain == "code":
-        result = await pipeline._node_extract_code({
-            "code_queries": payload.get("queries", []),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "stored": bool(result)}
+        if domain == "code":
+            result = await pipeline._node_extract_code(
+                {
+                    "code_queries": payload.get("queries", []),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "stored": bool(result)}
 
-    if domain == "snippet":
-        result = await pipeline._node_extract_snippet({
-            "code_queries": payload.get("queries", []),
-            "user_id": user_id,
-        })
-        return {"domain": domain, "stored": bool(result)}
+        if domain == "snippet":
+            result = await pipeline._node_extract_snippet(
+                {
+                    "code_queries": payload.get("queries", []),
+                    "user_id": user_id,
+                }
+            )
+            return {"domain": domain, "stored": bool(result)}
 
     raise ValueError(f"Unsupported memory domain activity: {domain}")
 
 
 @activity.defn
 async def memory_run_pipeline_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return await memory_v1._run_ingest_payload(payload, payload["user_id"])
+    with use_billing_context(
+        job_id=payload.get("billing_job_id") or payload.get("job_id"),
+        billing_account_id=payload.get("billing_account_id"),
+        user_id=payload.get("user_id", ""),
+    ):
+        return await memory_v1._run_ingest_payload(payload, payload["user_id"])
 
 
 @activity.defn
@@ -182,7 +211,9 @@ async def scanner_scan_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     from src.api.routes.v2.secrets import resolve_scanner_pat
 
     try:
-        pat = await asyncio.to_thread(resolve_scanner_pat, payload.get("github_credential_ref") or "")
+        pat = await asyncio.to_thread(
+            resolve_scanner_pat, payload.get("github_credential_ref") or ""
+        )
     except Exception as exc:
         error = str(exc) or exc.__class__.__name__
         await asyncio.to_thread(_mark_scanner_scan_failed, scanner_v1, payload, error)
