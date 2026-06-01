@@ -56,6 +56,12 @@ class FakeJobStore:
         job["error"] = error
         return "failed"
 
+    def mark_cancelled(self, job_id):
+        job = self.jobs[job_id]
+        job["status"] = "cancelled"
+        job["cancelled_at"] = "now"
+        job["completed_at"] = "now"
+
     def reset_for_retry(self, job_id, clear_workflow=False):
         job = self.jobs[job_id]
         job["status"] = "queued"
@@ -345,6 +351,46 @@ def test_v2_retry_start_failure_keeps_reused_billing_reservation(monkeypatch):
     assert response.status_code == 503
     assert released == []
     assert store.jobs["job-1"]["status"] == "failed"
+
+
+def test_v2_cancel_mark_failure_releases_billing_after_signal(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "running",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 0,
+        "attempt_count": 1,
+        "workflow_id": "workflow-1",
+    }
+    released = []
+    cancelled = []
+
+    async def fake_cancel_job_workflow(job):
+        cancelled.append(job["job_id"])
+
+    def fail_mark_cancelled(job_id):
+        raise RuntimeError("cancel status write failed")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "cancel_job_workflow", fake_cancel_job_workflow)
+    monkeypatch.setattr(store, "mark_cancelled", fail_mark_cancelled)
+    monkeypatch.setattr(
+        jobs_v2,
+        "release_job_billing",
+        lambda job, reason: released.append((job["job_id"], reason)),
+    )
+
+    response = TestClient(app).post("/v2/jobs/job-1/cancel")
+
+    assert response.status_code == 503
+    assert cancelled == ["job-1"]
+    assert released == [("job-1", "cancel_signal_sent")]
 
 
 def test_v1_batch_ingest_scopes_each_item_for_local_static_key(monkeypatch):

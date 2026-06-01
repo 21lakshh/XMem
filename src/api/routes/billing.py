@@ -208,6 +208,12 @@ async def verify_razorpay_payment(
     user_id = _user_id(current_user)
 
     if request.razorpay_subscription_id:
+        if not verify_subscription_signature(
+            request.razorpay_subscription_id,
+            request.razorpay_payment_id,
+            request.razorpay_signature,
+        ):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
         checkout = await asyncio.to_thread(
             service.store.get_checkout,
             request.razorpay_subscription_id,
@@ -218,12 +224,6 @@ async def verify_razorpay_payment(
             raise HTTPException(status_code=403, detail="Payment subscription does not belong to this user")
         if checkout.get("package_id") != "pro":
             raise HTTPException(status_code=400, detail="Payment subscription package mismatch")
-        if not verify_subscription_signature(
-            request.razorpay_subscription_id,
-            request.razorpay_payment_id,
-            request.razorpay_signature,
-        ):
-            raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
         await asyncio.to_thread(
             service.grant_pro_subscription,
             user_id=user_id,
