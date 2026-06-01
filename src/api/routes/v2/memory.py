@@ -19,8 +19,9 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse, BatchIngestRequest, IngestRequest, ScrapeRequest, StatusEnum
+from src.billing import InsufficientCredits, get_default_billing_service
 from src.config import settings
-from src.jobs.durable import QUEUED, get_default_job_store, new_attempt_id, stable_hash
+from src.jobs.durable import QUEUED, get_default_job_store, idempotency_key, new_attempt_id, stable_hash
 
 router = APIRouter(
     prefix="/v2/memory",
@@ -37,6 +38,10 @@ scrape_router = APIRouter(
 
 def _content_hash(payload: Dict[str, Any]) -> str:
     return stable_hash(payload)
+
+
+def _durable_job_id(job_type: str, fields: Dict[str, Any]) -> str:
+    return f"{job_type}:{idempotency_key(job_type, fields)}"
 
 
 class WorkflowStartFailed(RuntimeError):
@@ -117,22 +122,37 @@ async def ingest_memory_v2(req: IngestRequest, request: Request, user: dict = De
     payload = req.model_dump()
     payload["user_id"] = user_id
     payload["timeout_seconds"] = float(settings.memory_ingest_timeout_seconds)
+    idempotency_fields = {
+        "user_id": user_id,
+        "org_id": payload.get("org_id", "default"),
+        "content_hash": _content_hash({
+            "user_query": req.user_query,
+            "agent_response": req.agent_response or "",
+            "session_datetime": req.session_datetime,
+            "image_url": req.image_url,
+            "effort_level": req.effort_level,
+        }),
+    }
+    job_id = _durable_job_id("memory_ingest", idempotency_fields)
+    billing_service = get_default_billing_service()
+    billing_reservation_created = False
 
     try:
+        account, estimate, reservation = await asyncio.to_thread(
+            billing_service.reserve_job_credits,
+            user=user,
+            job_id=job_id,
+            job_type="memory_ingest",
+            payload=payload,
+        )
+        payload["billing_account_id"] = account["id"]
+        payload["billing_reservation_id"] = reservation.reservation_id
+        payload["billing_estimate"] = estimate.model_dump()
+        billing_reservation_created = reservation.created
         job, created = await _enqueue_and_start(
             job_type="memory_ingest",
             payload=payload,
-            idempotency_fields={
-                "user_id": user_id,
-                "org_id": payload.get("org_id", "default"),
-                "content_hash": _content_hash({
-                    "user_query": req.user_query,
-                    "agent_response": req.agent_response or "",
-                    "session_datetime": req.session_datetime,
-                    "image_url": req.image_url,
-                    "effort_level": req.effort_level,
-                }),
-            },
+            idempotency_fields=idempotency_fields,
             user_id=job_user_id,
             timeout_seconds=float(settings.memory_ingest_timeout_seconds),
             max_attempts=3,
@@ -145,6 +165,12 @@ async def ingest_memory_v2(req: IngestRequest, request: Request, user: dict = De
             elapsed_ms(start),
         )
     except WorkflowStartFailed as exc:
+        if billing_reservation_created and payload.get("billing_account_id"):
+            await asyncio.to_thread(
+                billing_service.release_job_reservation,
+                payload["billing_account_id"],
+                job_id,
+            )
         return _workflow_start_error(
             request,
             exc.job,
@@ -152,7 +178,15 @@ async def ingest_memory_v2(req: IngestRequest, request: Request, user: dict = De
             f"/v2/memory/ingest/{exc.job['job_id']}/status",
             elapsed_ms(start),
         )
+    except InsufficientCredits as exc:
+        return _error(request, str(exc), 402, elapsed_ms(start))
     except Exception as exc:
+        if billing_reservation_created and payload.get("billing_account_id"):
+            await asyncio.to_thread(
+                billing_service.release_job_reservation,
+                payload["billing_account_id"],
+                job_id,
+            )
         return _error(request, str(exc), 500, elapsed_ms(start))
 
 
@@ -183,15 +217,30 @@ async def batch_ingest_memory_v2(req: BatchIngestRequest, request: Request, user
             min(len(req.items) * float(settings.memory_ingest_timeout_seconds), 3600.0),
         ),
     }
+    idempotency_fields = {
+        "user_id": user_id,
+        "content_hash": _content_hash({"items": items}),
+    }
+    job_id = _durable_job_id("memory_batch_ingest", idempotency_fields)
+    billing_service = get_default_billing_service()
+    billing_reservation_created = False
 
     try:
+        account, estimate, reservation = await asyncio.to_thread(
+            billing_service.reserve_job_credits,
+            user=user,
+            job_id=job_id,
+            job_type="memory_batch_ingest",
+            payload=payload,
+        )
+        payload["billing_account_id"] = account["id"]
+        payload["billing_reservation_id"] = reservation.reservation_id
+        payload["billing_estimate"] = estimate.model_dump()
+        billing_reservation_created = reservation.created
         job, created = await _enqueue_and_start(
             job_type="memory_batch_ingest",
             payload=payload,
-            idempotency_fields={
-                "user_id": user_id,
-                "content_hash": _content_hash({"items": items}),
-            },
+            idempotency_fields=idempotency_fields,
             user_id=user_id,
             timeout_seconds=payload["timeout_seconds"],
             max_attempts=3,
@@ -204,6 +253,12 @@ async def batch_ingest_memory_v2(req: BatchIngestRequest, request: Request, user
             elapsed_ms(start),
         )
     except WorkflowStartFailed as exc:
+        if billing_reservation_created and payload.get("billing_account_id"):
+            await asyncio.to_thread(
+                billing_service.release_job_reservation,
+                payload["billing_account_id"],
+                job_id,
+            )
         return _workflow_start_error(
             request,
             exc.job,
@@ -211,7 +266,15 @@ async def batch_ingest_memory_v2(req: BatchIngestRequest, request: Request, user
             f"/v2/memory/jobs/{exc.job['job_id']}/status",
             elapsed_ms(start),
         )
+    except InsufficientCredits as exc:
+        return _error(request, str(exc), 402, elapsed_ms(start))
     except Exception as exc:
+        if billing_reservation_created and payload.get("billing_account_id"):
+            await asyncio.to_thread(
+                billing_service.release_job_reservation,
+                payload["billing_account_id"],
+                job_id,
+            )
         return _error(request, str(exc), 500, elapsed_ms(start))
 
 

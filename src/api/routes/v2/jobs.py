@@ -17,7 +17,13 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import cancel_job_workflow, start_job_workflow
 from src.api.schemas import APIResponse
-from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
+from src.billing import (
+    InsufficientCredits,
+    get_default_billing_service,
+    release_job_billing,
+    release_job_reservation,
+)
+from src.jobs.durable import CANCELLED, DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
 
 router = APIRouter(
     prefix="/v2/jobs",
@@ -112,12 +118,38 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
     if job.get("status") not in {"failed", "dead_letter", "cancelled"}:
         return _error(request, "Only failed, dead-lettered, or cancelled jobs can be retried.", 409, elapsed_ms(start))
 
-    await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
-    job = await asyncio.to_thread(get_default_job_store().get, job_id)
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    billing_account_id = payload.get("billing_account_id")
+    billing_reservation_created = False
     try:
+        if billing_account_id:
+            billing_service = get_default_billing_service()
+            estimate = billing_service.estimate_required_credits(job.get("job_type") or "", payload)
+            reservation = await asyncio.to_thread(
+                billing_service.reserve_credits,
+                billing_account_id,
+                job_id,
+                estimate.reserved_credits,
+            )
+            payload["billing_reservation_id"] = reservation.reservation_id
+            payload["billing_estimate"] = estimate.model_dump()
+            billing_reservation_created = reservation.created
+            await asyncio.to_thread(get_default_job_store().update_payload, job_id, payload)
+        await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
+        job = await asyncio.to_thread(get_default_job_store().get, job_id)
         await start_job_workflow(job)
+    except InsufficientCredits as exc:
+        return _error(request, str(exc), 402, elapsed_ms(start))
     except Exception as exc:
+        release_error = None
+        if billing_reservation_created and billing_account_id:
+            try:
+                await asyncio.to_thread(release_job_reservation, billing_account_id, job_id)
+            except Exception as release_exc:
+                release_error = str(release_exc) or release_exc.__class__.__name__
         error = str(exc) or exc.__class__.__name__
+        if release_error:
+            error = f"{error}; billing reservation release failed: {release_error}"
         await asyncio.to_thread(get_default_job_store().mark_failed, job_id, error)
         return _error(request, f"Retry failed to start workflow: {error}", 503, elapsed_ms(start))
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
@@ -131,14 +163,21 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
     job = await read_user_job(job_id, user_id)
     if not job:
         return _error(request, "Job not found.", 404, elapsed_ms(start))
-    if job.get("status") not in {QUEUED, RUNNING}:
-        return _error(request, "Only queued or running jobs can be cancelled.", 409, elapsed_ms(start))
-    try:
-        await cancel_job_workflow(job)
-    except Exception as exc:
-        error = str(exc) or exc.__class__.__name__
-        return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
-    await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
-    await asyncio.to_thread(_mark_scanner_job_cancelled, job)
+    if job.get("status") not in {QUEUED, RUNNING, CANCELLED}:
+        return _error(request, "Only queued, running, or already-cancelled jobs can be cancelled.", 409, elapsed_ms(start))
+    if job.get("status") != CANCELLED:
+        cancel_signal_sent = False
+        try:
+            await cancel_job_workflow(job)
+            cancel_signal_sent = True
+            await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
+            await asyncio.to_thread(_mark_scanner_job_cancelled, job)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            if cancel_signal_sent:
+                return _error(request, f"Cancel reached workflow but failed to persist status: {error}", 503, elapsed_ms(start))
+            return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
+        job = await asyncio.to_thread(get_default_job_store().get, job_id)
+    await asyncio.to_thread(release_job_billing, job, "cancelled")
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
     return _wrap(request, job_status_data(job), elapsed_ms(start))

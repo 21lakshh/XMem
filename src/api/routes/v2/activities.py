@@ -9,6 +9,7 @@ from fastapi.encoders import jsonable_encoder
 
 from src.api.dependencies import get_ingest_pipeline
 from src.api.routes import memory as memory_v1
+from src.billing.service import commit_job_billing, release_job_billing
 from src.jobs.durable import get_default_job_store
 
 try:  # pragma: no cover - no-op fallback keeps imports working without SDK.
@@ -50,15 +51,22 @@ async def mark_job_progress_activity(payload: Dict[str, Any]) -> None:
 
 @activity.defn
 async def mark_job_succeeded_activity(payload: Dict[str, Any]) -> None:
+    job = await asyncio.to_thread(get_default_job_store().get, payload["job_id"])
+    result = payload.get("result") or {}
+    if job:
+        result = await asyncio.to_thread(commit_job_billing, job, result)
     await asyncio.to_thread(
         get_default_job_store().mark_succeeded,
         payload["job_id"],
-        payload.get("result") or {},
+        result,
     )
 
 
 @activity.defn
 async def mark_job_dead_letter_activity(payload: Dict[str, Any]) -> None:
+    job = await asyncio.to_thread(get_default_job_store().get, payload["job_id"])
+    if job:
+        await asyncio.to_thread(release_job_billing, job, "dead_letter")
     await asyncio.to_thread(
         get_default_job_store().mark_dead_letter,
         payload["job_id"],

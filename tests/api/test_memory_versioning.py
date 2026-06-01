@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 
 from src.api import dependencies as deps
 from src.api.routes import memory
+from src.api.routes.v2 import jobs as jobs_v2
 from src.api.routes.v2 import memory as memory_v2
+from src.jobs import durable
 
 
 class FakeIngestPipeline:
@@ -54,6 +56,23 @@ class FakeJobStore:
         job["error"] = error
         return "failed"
 
+    def mark_cancelled(self, job_id):
+        job = self.jobs[job_id]
+        job["status"] = "cancelled"
+        job["cancelled_at"] = "now"
+        job["completed_at"] = "now"
+
+    def reset_for_retry(self, job_id, clear_workflow=False):
+        job = self.jobs[job_id]
+        job["status"] = "queued"
+        job["error"] = None
+        if clear_workflow:
+            job["workflow_id"] = None
+            job["run_id"] = None
+
+    def update_payload(self, job_id, payload):
+        self.jobs[job_id]["payload"] = payload
+
     def reserve_workflow_start(self, job_id, workflow_id):
         job = self.jobs[job_id]
         if job["status"] != "queued" or job.get("workflow_id"):
@@ -86,6 +105,7 @@ def _build_app(monkeypatch, user=None):
     app.include_router(memory.router)
     app.include_router(memory_v2.scrape_router)
     app.include_router(memory_v2.router)
+    app.include_router(jobs_v2.router)
     return app, ingest
 
 
@@ -180,6 +200,249 @@ def test_v2_ingest_start_failure_returns_durable_job_handle(monkeypatch):
     assert body["data"]["status_url"] == "/v2/memory/ingest/memory_ingest:fake/status"
     assert store.jobs["memory_ingest:fake"]["error"] == "temporal unavailable"
     assert ingest.calls == []
+
+
+def test_v2_retry_start_failure_releases_fresh_billing_reservation(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "failed",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 1,
+        "attempt_count": 1,
+        "workflow_id": "old-workflow",
+    }
+    released = []
+
+    class FakeEstimate:
+        reserved_credits = 100
+
+        def model_dump(self):
+            return {"reserved_credits": self.reserved_credits}
+
+    class FakeBillingService:
+        def estimate_required_credits(self, job_type, payload):
+            return FakeEstimate()
+
+        def reserve_credits(self, account_id, job_id, estimated_credits):
+            return SimpleNamespace(reservation_id="reservation-1", created=True)
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    def fake_release(account_id, job_id):
+        released.append((account_id, job_id))
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "get_default_billing_service", lambda: FakeBillingService())
+    monkeypatch.setattr(jobs_v2, "release_job_reservation", fake_release)
+    monkeypatch.setattr(jobs_v2, "start_job_workflow", fake_start_job_workflow)
+
+    response = TestClient(app).post("/v2/jobs/job-1/retry")
+
+    assert response.status_code == 503
+    assert released == [("acct-1", "job-1")]
+    assert store.jobs["job-1"]["status"] == "failed"
+    assert store.jobs["job-1"]["error"] == "temporal unavailable"
+
+
+def test_v2_retry_payload_update_failure_releases_fresh_billing_reservation(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "failed",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 1,
+        "attempt_count": 1,
+        "workflow_id": "old-workflow",
+    }
+    released = []
+
+    class FakeEstimate:
+        reserved_credits = 100
+
+        def model_dump(self):
+            return {"reserved_credits": self.reserved_credits}
+
+    class FakeBillingService:
+        def estimate_required_credits(self, job_type, payload):
+            return FakeEstimate()
+
+        def reserve_credits(self, account_id, job_id, estimated_credits):
+            return SimpleNamespace(reservation_id="reservation-1", created=True)
+
+    def fail_update_payload(job_id, payload):
+        raise RuntimeError("payload write failed")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "get_default_billing_service", lambda: FakeBillingService())
+    monkeypatch.setattr(store, "update_payload", fail_update_payload)
+    monkeypatch.setattr(
+        jobs_v2,
+        "release_job_reservation",
+        lambda account_id, job_id: released.append((account_id, job_id)),
+    )
+
+    response = TestClient(app).post("/v2/jobs/job-1/retry")
+
+    assert response.status_code == 503
+    assert released == [("acct-1", "job-1")]
+    assert store.jobs["job-1"]["status"] == "failed"
+    assert store.jobs["job-1"]["error"] == "payload write failed"
+
+
+def test_v2_retry_release_failure_still_marks_job_failed(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "failed",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 1,
+        "attempt_count": 1,
+        "workflow_id": "old-workflow",
+    }
+
+    class FakeEstimate:
+        reserved_credits = 100
+
+        def model_dump(self):
+            return {"reserved_credits": self.reserved_credits}
+
+    class FakeBillingService:
+        def estimate_required_credits(self, job_type, payload):
+            return FakeEstimate()
+
+        def reserve_credits(self, account_id, job_id, estimated_credits):
+            return SimpleNamespace(reservation_id="reservation-1", created=True)
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    def fail_release(account_id, job_id):
+        raise RuntimeError("mongo unavailable")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "get_default_billing_service", lambda: FakeBillingService())
+    monkeypatch.setattr(jobs_v2, "release_job_reservation", fail_release)
+    monkeypatch.setattr(jobs_v2, "start_job_workflow", fake_start_job_workflow)
+
+    response = TestClient(app).post("/v2/jobs/job-1/retry")
+
+    assert response.status_code == 503
+    assert store.jobs["job-1"]["status"] == "failed"
+    assert store.jobs["job-1"]["error"] == (
+        "temporal unavailable; billing reservation release failed: mongo unavailable"
+    )
+
+
+def test_v2_retry_start_failure_keeps_reused_billing_reservation(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "failed",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 1,
+        "attempt_count": 1,
+        "workflow_id": "old-workflow",
+    }
+    released = []
+
+    class FakeEstimate:
+        reserved_credits = 100
+
+        def model_dump(self):
+            return {"reserved_credits": self.reserved_credits}
+
+    class FakeBillingService:
+        def estimate_required_credits(self, job_type, payload):
+            return FakeEstimate()
+
+        def reserve_credits(self, account_id, job_id, estimated_credits):
+            return SimpleNamespace(reservation_id="reservation-1", created=False)
+
+    async def fake_start_job_workflow(job):
+        raise RuntimeError("temporal unavailable")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "get_default_billing_service", lambda: FakeBillingService())
+    monkeypatch.setattr(
+        jobs_v2,
+        "release_job_reservation",
+        lambda account_id, job_id: released.append((account_id, job_id)),
+    )
+    monkeypatch.setattr(jobs_v2, "start_job_workflow", fake_start_job_workflow)
+
+    response = TestClient(app).post("/v2/jobs/job-1/retry")
+
+    assert response.status_code == 503
+    assert released == []
+    assert store.jobs["job-1"]["status"] == "failed"
+
+
+def test_v2_cancel_mark_failure_keeps_billing_reserved_after_signal(monkeypatch):
+    app, _ = _build_app(monkeypatch)
+    store = FakeJobStore()
+    store.jobs["job-1"] = {
+        "job_id": "job-1",
+        "job_type": "memory_ingest",
+        "payload": {"billing_account_id": "acct-1", "user_id": "hunter"},
+        "user_id": "hunter",
+        "status": "running",
+        "timeout_seconds": 30,
+        "max_attempts": 3,
+        "retry_count": 0,
+        "attempt_count": 1,
+        "workflow_id": "workflow-1",
+    }
+    released = []
+    cancelled = []
+
+    async def fake_cancel_job_workflow(job):
+        cancelled.append(job["job_id"])
+
+    def fail_mark_cancelled(job_id):
+        raise RuntimeError("cancel status write failed")
+
+    monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(jobs_v2, "cancel_job_workflow", fake_cancel_job_workflow)
+    monkeypatch.setattr(store, "mark_cancelled", fail_mark_cancelled)
+    monkeypatch.setattr(
+        jobs_v2,
+        "release_job_billing",
+        lambda job, reason: released.append((job["job_id"], reason)),
+    )
+
+    response = TestClient(app).post("/v2/jobs/job-1/cancel")
+
+    assert response.status_code == 503
+    assert cancelled == ["job-1"]
+    assert released == []
+    assert store.jobs["job-1"]["status"] == "running"
 
 
 def test_v1_batch_ingest_scopes_each_item_for_local_static_key(monkeypatch):
