@@ -351,6 +351,8 @@ function configuredProviders(envPath) {
   if (configuredValue(envPath, "GEMINI_API_KEY")) providers.push("gemini");
   if (configuredValue(envPath, "CLAUDE_API_KEY")) providers.push("claude");
   if (configuredValue(envPath, "OPENAI_API_KEY")) providers.push("openai");
+  if (configuredValue(envPath, "DEEPSEEK_API_KEY")) providers.push("deepseek");
+  if (configuredValue(envPath, "MIMO_API_KEY")) providers.push("mimo");
   if (
     configuredValue(envPath, "AWS_ACCESS_KEY_ID") &&
     configuredValue(envPath, "AWS_SECRET_ACCESS_KEY")

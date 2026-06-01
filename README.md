@@ -386,6 +386,8 @@ XMem is highly configurable. Override any agent's model, tune the fallback chain
     <th>Description</th>
   </tr>
   <tr><td><code>FALLBACK_ORDER</code></td><td><code>openrouter,gemini,claude,openai</code></td><td>Provider failover sequence</td></tr>
+  <tr><td><code>DEEPSEEK_API_KEY</code></td><td>empty</td><td>DeepSeek API key for the official OpenAI-compatible endpoint</td></tr>
+  <tr><td><code>MIMO_API_KEY</code></td><td>empty</td><td>Xiaomi MiMo API key for the official OpenAI-compatible endpoint</td></tr>
   <tr><td><code>CLASSIFIER_MODEL</code></td><td>default model</td><td>Override model for classifier agent</td></tr>
   <tr><td><code>JUDGE_MODEL</code></td><td>default model</td><td>Override model for judge agent</td></tr>
   <tr><td><code>RETRIEVAL_MODEL</code></td><td>default model</td><td>Override model for retrieval synthesis</td></tr>
