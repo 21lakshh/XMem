@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -15,6 +16,8 @@ from src.api.routes.v2.shared import _error, _wrap, accepted_job, elapsed_ms, jo
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse
 from src.jobs.durable import get_default_job_store
+
+logger = logging.getLogger("xmem.api.routes.v2.scanner")
 
 router = APIRouter(prefix="/v2/scanner", tags=["scanner-v2"])
 
@@ -59,10 +62,27 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
         clone_url += ".git"
     branch = (req.branch or "main").strip()
     loop = asyncio.get_running_loop()
-    remote_sha = await loop.run_in_executor(
-        None,
-        lambda: scanner_v1._get_branch_tip_sha(org, repo, branch, req.pat),
-    )
+    try:
+        remote_sha = await loop.run_in_executor(
+            None,
+            lambda: scanner_v1._get_branch_tip_sha(org, repo, branch, req.pat),
+        )
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        logger.warning(
+            "Failed to inspect GitHub branch %s/%s:%s: %s",
+            org,
+            repo,
+            branch,
+            error,
+        )
+        return JSONResponse({
+            "status": "error",
+            "org": org,
+            "repo": repo,
+            "branch": branch,
+            "error": f"Failed to inspect GitHub branch: {error}",
+        }, status_code=400)
     full_reuse, phase2_only = scanner_v1._can_reuse_index(org, repo, remote_sha)
 
     if full_reuse:
@@ -236,7 +256,7 @@ async def scan_status_v2(
             "phase2_status": "not_started",
         })
 
-    elapsed = time.time() - float(job.get("started_at", time.time()))
+    elapsed = time.time() - float(job.get("started_at") or time.time())
     resp: Dict[str, Any] = {
         "status": "ok",
         "job_id": scanner_job_id,

@@ -99,7 +99,14 @@ async def cancel_job_workflow(job: Dict[str, Any]) -> None:
         return
     client = await get_temporal_client()
     handle = client.get_workflow_handle(workflow_id)
-    await handle.cancel()
+    try:
+        await handle.cancel()
+    except Exception as exc:
+        logger.warning(
+            "Failed to cancel Temporal workflow %s; it may have already completed: %s",
+            workflow_id,
+            exc,
+        )
 
 
 async def _record_temporal_ids(

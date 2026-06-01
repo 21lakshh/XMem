@@ -7,7 +7,14 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from src.api.dependencies import enforce_rate_limit, require_api_key
 from src.api.routes import memory as memory_v1
-from src.api.routes.v2.shared import _error, _wrap, elapsed_ms, job_status_data, read_user_job
+from src.api.routes import scanner as scanner_v1
+from src.api.routes.v2.shared import (
+    _error,
+    _wrap,
+    elapsed_ms,
+    job_status_data,
+    read_user_job,
+)
 from src.api.routes.v2.temporal_client import cancel_job_workflow, start_job_workflow
 from src.api.schemas import APIResponse
 from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
@@ -17,6 +24,56 @@ router = APIRouter(
     tags=["jobs-v2"],
     dependencies=[Depends(enforce_rate_limit)],
 )
+
+
+def _mark_scanner_job_cancelled(job: dict) -> None:
+    scanner_job_types = {
+        "scanner_scan",
+        "scanner_phase2",
+        "scanner_scan_resume",
+        "scanner_phase2_resume",
+    }
+    if job.get("job_type") not in scanner_job_types:
+        return
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    scanner_job_id = payload.get("scanner_job_id")
+    if not scanner_job_id:
+        return
+
+    store = scanner_v1._get_code_store()
+    existing = store.get_scanner_job(scanner_job_id)
+    if not existing:
+        return
+
+    phase1_status = existing.get("phase1_status", "not_started")
+    phase2_status = existing.get("phase2_status", "not_started")
+    if phase1_status == "running":
+        phase1_status = "cancelled"
+    if phase2_status == "running":
+        phase2_status = "cancelled"
+
+    store.upsert_scanner_job(
+        job_id=scanner_job_id,
+        username=(
+            existing.get("username")
+            or job.get("user_id")
+            or payload.get("username")
+            or ""
+        ),
+        org=existing.get("org") or payload.get("org") or "",
+        repo=existing.get("repo") or payload.get("repo") or "",
+        branch=existing.get("branch") or payload.get("branch") or "main",
+        url=existing.get("url") or payload.get("github_url") or "",
+        phase1_status=phase1_status,
+        phase2_status=phase2_status,
+        started_at=float(existing.get("started_at") or time.time()),
+        error="Scan cancelled.",
+        phase1_result=existing.get("phase1_result"),
+        phase2_result=existing.get("phase2_result"),
+        durable_job_id=job.get("job_id"),
+        retry_count=int(job.get("retry_count") or 0),
+        timeout_seconds=float(job.get("timeout_seconds") or 0) or None,
+    )
 
 
 @router.get("/{job_id}/status", response_model=APIResponse, summary="Poll a durable v2 job")
@@ -78,5 +135,6 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
         return _error(request, "Only queued or running jobs can be cancelled.", 409, elapsed_ms(start))
     await cancel_job_workflow(job)
     await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
+    await asyncio.to_thread(_mark_scanner_job_cancelled, job)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
     return _wrap(request, job_status_data(job), elapsed_ms(start))

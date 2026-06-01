@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet, InvalidToken
 from src.jobs.durable import get_default_job_store
 
 _IN_MEMORY_SECRETS: Dict[str, Dict[str, Any]] = {}
-_secrets_indexes_created = False
 
 
 def _now() -> datetime:
@@ -28,17 +27,15 @@ def _fernet() -> Fernet:
 
 
 def _collection():
-    global _secrets_indexes_created
-
     store = get_default_job_store()
-    db = getattr(store, "_db", None)
-    if db is None:
+    get_collection = getattr(store, "get_collection", None)
+    if get_collection is None:
+        raise RuntimeError("Durable job store does not expose collection access.")
+    collection = get_collection("durable_job_secrets")
+    if collection is None:
         return None
-    collection = db["durable_job_secrets"]
-    if not _secrets_indexes_created:
-        collection.create_index([("secret_ref", 1)], unique=True)
-        collection.create_index([("job_id", 1)])
-        _secrets_indexes_created = True
+    collection.create_index([("secret_ref", 1)], unique=True)
+    collection.create_index([("job_id", 1)])
     return collection
 
 
@@ -72,9 +69,13 @@ def resolve_scanner_pat(secret_ref: str) -> str:
     if not secret_ref:
         return ""
     collection = _collection()
-    doc = _IN_MEMORY_SECRETS.get(secret_ref) if collection is None else collection.find_one({"secret_ref": secret_ref})
+    doc = (
+        _IN_MEMORY_SECRETS.get(secret_ref)
+        if collection is None
+        else collection.find_one({"secret_ref": secret_ref})
+    )
     if not doc:
-        return ""
+        raise ValueError("Scanner credential could not be found.")
     try:
         return _fernet().decrypt(str(doc["ciphertext"]).encode("utf-8")).decode("utf-8")
     except (InvalidToken, KeyError) as exc:

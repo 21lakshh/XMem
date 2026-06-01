@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
 from fastapi.encoders import jsonable_encoder
@@ -19,6 +20,9 @@ except Exception:  # pragma: no cover
             return fn
 
     activity = _ActivityFallback()
+
+
+_scrape_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xmem-scrape")
 
 
 def _domain_payload(result: Dict[str, Any], domain: str) -> Dict[str, Any] | None:
@@ -147,7 +151,28 @@ async def memory_batch_ingest_activity(payload: Dict[str, Any]) -> Dict[str, Any
 
 @activity.defn
 async def memory_scrape_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return await memory_v1._run_scrape_payload(payload)
+    def _run_scrape() -> Dict[str, Any]:
+        html, final_url = memory_v1._render_chat_share_sync(payload["url"])
+        provider, extraction_method, pairs = memory_v1._extract_chat_pairs(
+            final_url or payload["url"],
+            html,
+            payload["url"],
+        )
+        result = {
+            "provider": provider,
+            "url": payload["url"],
+            "final_url": final_url,
+            "pairs": pairs,
+            "pair_count": len(pairs),
+            "html_length": len(html),
+            "extraction_method": extraction_method,
+        }
+        if not pairs:
+            raise ValueError(memory_v1._chat_share_error_message(result))
+        return memory_v1.ScrapeResponse(pairs=pairs).model_dump()
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_scrape_executor, _run_scrape)
 
 
 @activity.defn

@@ -129,6 +129,9 @@ class DurableJobStore:
         self.jobs.create_index([("status", 1), ("updated_at", 1)])
         self.jobs.create_index([("workflow_id", 1)])
 
+    def get_collection(self, name: str):
+        return self._db[name]
+
     def enqueue(
         self,
         *,
@@ -206,13 +209,14 @@ class DurableJobStore:
     def mark_running(self, job_id: str) -> None:
         job = self.get(job_id) or {}
         attempt_count = int(job.get("attempt_count") or 0) + 1
+        retry_count = max(attempt_count - 1, 0)
         self.jobs.update_one(
             {"job_id": job_id},
             {
                 "$set": {
                     "status": RUNNING,
                     "attempt_count": attempt_count,
-                    "retry_count": max(attempt_count - 1, 0),
+                    "retry_count": retry_count,
                     "started_at": utc_now(),
                     "updated_at": utc_now(),
                     "error": None,
