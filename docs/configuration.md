@@ -136,8 +136,6 @@ Pull the model before starting XMem:
 ollama pull llama3.1:8b
 ```
 
-You can also mix local and cloud fallback:
-
 For DeepSeek, configure the dedicated provider entry so XMem can distinguish it
 from official OpenAI:
 
@@ -164,6 +162,8 @@ the existing `openai` provider reserved for official OpenAI endpoints.
 DeepSeek and MiMo both expose OpenAI-compatible chat APIs, but XMem treats them
 as separate providers so local setup, diagnostics, and model selection stay
 obvious in the environment file.
+
+You can also mix local and cloud fallback:
 
 ```env
 FALLBACK_ORDER=["ollama", "openrouter", "gemini"]

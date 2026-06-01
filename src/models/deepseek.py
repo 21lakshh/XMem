@@ -21,4 +21,5 @@ def build_deepseek_model(
         api_key=api_key,
         base_url=settings.deepseek_base_url,
         temperature=temperature if temperature is not None else settings.temperature,
+        timeout=settings.llm_timeout_seconds,
     )
