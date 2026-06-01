@@ -210,22 +210,28 @@ class DurableJobStore:
         )
 
     def mark_running(self, job_id: str) -> None:
-        job = self.get(job_id) or {}
-        attempt_count = int(job.get("attempt_count") or 0) + 1
-        retry_count = max(attempt_count - 1, 0)
-        self.jobs.update_one(
+        now = utc_now()
+        job = self.jobs.find_one_and_update(
             {"job_id": job_id},
             {
+                "$inc": {"attempt_count": 1},
                 "$set": {
                     "status": RUNNING,
-                    "attempt_count": attempt_count,
-                    "retry_count": retry_count,
-                    "started_at": utc_now(),
-                    "updated_at": utc_now(),
+                    "started_at": now,
+                    "updated_at": now,
                     "error": None,
                     "error_state": None,
                 },
             },
+            return_document=True,
+        )
+        if job is None:
+            return
+
+        attempt_count = int(job.get("attempt_count") or 0)
+        self.jobs.update_one(
+            {"job_id": job_id, "attempt_count": attempt_count},
+            {"$set": {"retry_count": max(attempt_count - 1, 0)}},
         )
 
     def update_progress(self, job_id: str, progress: Mapping[str, Any]) -> None:

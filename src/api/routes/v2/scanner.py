@@ -9,7 +9,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
-from src.api.dependencies import require_api_key
+from src.api.dependencies import enforce_rate_limit, require_api_key
 from src.api.routes import scanner as scanner_v1
 from src.api.routes.v2.secrets import store_scanner_pat
 from src.api.routes.v2.shared import _error, _wrap, accepted_job, elapsed_ms, job_status_data, read_user_job
@@ -19,7 +19,11 @@ from src.jobs.durable import get_default_job_store
 
 logger = logging.getLogger("xmem.api.routes.v2.scanner")
 
-router = APIRouter(prefix="/v2/scanner", tags=["scanner-v2"])
+router = APIRouter(
+    prefix="/v2/scanner",
+    tags=["scanner-v2"],
+    dependencies=[Depends(enforce_rate_limit)],
+)
 
 
 def _as_aware_utc(value: datetime) -> datetime:
