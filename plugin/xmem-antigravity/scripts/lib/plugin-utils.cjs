@@ -66,6 +66,7 @@ function redactSecrets(text) {
   return String(text || "")
     .replace(/xmem_[A-Za-z0-9_-]{12,}/g, "[redacted-xmem-key]")
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, "[redacted-api-key]")
+    .replace(/gsk_[A-Za-z0-9_-]{16,}/g, "[redacted-groq-key]")
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"'`]+/gi, "$1[redacted]")
     .replace(/(bearer\s+)[^\s"'`]+/gi, "$1[redacted]")
     .replace(/((?:api[_-]?key|authorization|token)\s*[:=]\s*)[^\s"'`]+/gi, "$1[redacted]");
