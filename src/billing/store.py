@@ -514,38 +514,37 @@ class BillingStore:
         if duplicate:
             return duplicate
         now = utc_now()
-        reservation = self._claim_reservation_for_commit(account_id, job_id, final_amount, now)
-        if reservation.get("type") == "debit":
-            return reservation
-        reserved = int(reservation.get("reserved_credits") or 0)
-        extra = max(final_amount - reserved, 0)
-        refund = max(reserved - final_amount, 0)
 
-        entry = {
-            "id": uuid.uuid4().hex,
-            "billing_account_id": account_id,
-            "type": "debit",
-            "amount": -final_amount,
-            "job_id": job_id,
-            "idempotency_key": f"debit:{job_id}",
-            "metadata": metadata or {},
-            "created_at": now,
-        }
-        refund_entry = None
-        if refund:
-            refund_entry = {
+        if self._in_memory:
+            reservation = self._claim_reservation_for_commit(account_id, job_id, final_amount, now)
+            if reservation.get("type") == "debit":
+                return reservation
+            reserved = int(reservation.get("reserved_credits") or 0)
+            extra = max(final_amount - reserved, 0)
+            refund = max(reserved - final_amount, 0)
+            entry = {
                 "id": uuid.uuid4().hex,
                 "billing_account_id": account_id,
-                "type": "refund",
-                "amount": refund,
+                "type": "debit",
+                "amount": -final_amount,
                 "job_id": job_id,
-                "idempotency_key": f"refund:{job_id}",
-                "metadata": {"reason": "unused_reservation"},
+                "idempotency_key": f"debit:{job_id}",
+                "metadata": metadata or {},
                 "created_at": now,
             }
-
-        try:
-            if self._in_memory:
+            refund_entry = None
+            if refund:
+                refund_entry = {
+                    "id": uuid.uuid4().hex,
+                    "billing_account_id": account_id,
+                    "type": "refund",
+                    "amount": refund,
+                    "job_id": job_id,
+                    "idempotency_key": f"refund:{job_id}",
+                    "metadata": {"reason": "unused_reservation"},
+                    "created_at": now,
+                }
+            try:
                 if extra:
                     wallet = self.get_wallet(account_id)
                     if int(wallet.get("available_credits") or 0) < extra:
@@ -562,53 +561,107 @@ class BillingStore:
                 if refund_entry:
                     self._insert_ledger(refund_entry)
                 return entry
+            except Exception:
+                self._release_commit_claim(account_id, job_id)
+                raise
 
-            with self._client.start_session() as session:
-                with session.start_transaction():
-                    existing = self.ledger.find_one(
-                        {"idempotency_key": f"debit:{job_id}"},
-                        session=session,
-                    )
-                    if existing:
-                        return _without_id(existing) or {}
+        from pymongo import ReturnDocument
 
-                    if extra:
-                        wallet = self.wallets.find_one_and_update(
-                            {"billing_account_id": account_id, "available_credits": {"$gte": extra}},
-                            {"$inc": {"available_credits": -extra}, "$set": {"updated_at": now}},
-                            return_document=True,
-                            session=session,
+        entry = None
+        with self._client.start_session() as session:
+            with session.start_transaction():
+                existing = self.ledger.find_one(
+                    {"idempotency_key": f"debit:{job_id}"},
+                    session=session,
+                )
+                if existing:
+                    return _without_id(existing) or {}
+
+                reservation_doc = self.reservations.find_one_and_update(
+                    {"job_id": job_id, "billing_account_id": account_id, "status": "active"},
+                    {
+                        "$set": {
+                            "status": "committing",
+                            "final_credits": final_amount,
+                            "updated_at": now,
+                        }
+                    },
+                    return_document=ReturnDocument.BEFORE,
+                    session=session,
+                )
+                if not reservation_doc:
+                    current = self.reservations.find_one({"job_id": job_id}, session=session)
+                    current = _without_id(current)
+                    if current and current.get("billing_account_id") != account_id:
+                        raise BillingStoreError(
+                            f"Reservation for job {job_id} belongs to a different billing account"
                         )
-                        if not wallet:
-                            current = self.get_wallet(account_id)
-                            raise InsufficientCredits(extra, int(current.get("available_credits") or 0))
+                    raise BillingStoreError(f"Reservation for job {job_id} is not active")
 
-                    self._consume_lots(account_id, final_amount, session=session)
-                    self.wallets.update_one(
-                        {"billing_account_id": account_id},
-                        {
-                            "$inc": {"reserved_credits": -reserved, "available_credits": refund},
-                            "$set": {"updated_at": now},
-                        },
+                reservation = _without_id(reservation_doc) or {}
+                reserved = int(reservation.get("reserved_credits") or 0)
+                extra = max(final_amount - reserved, 0)
+                refund = max(reserved - final_amount, 0)
+                entry = {
+                    "id": uuid.uuid4().hex,
+                    "billing_account_id": account_id,
+                    "type": "debit",
+                    "amount": -final_amount,
+                    "job_id": job_id,
+                    "idempotency_key": f"debit:{job_id}",
+                    "metadata": metadata or {},
+                    "created_at": now,
+                }
+                refund_entry = None
+                if refund:
+                    refund_entry = {
+                        "id": uuid.uuid4().hex,
+                        "billing_account_id": account_id,
+                        "type": "refund",
+                        "amount": refund,
+                        "job_id": job_id,
+                        "idempotency_key": f"refund:{job_id}",
+                        "metadata": {"reason": "unused_reservation"},
+                        "created_at": now,
+                    }
+
+                if extra:
+                    wallet = self.wallets.find_one_and_update(
+                        {"billing_account_id": account_id, "available_credits": {"$gte": extra}},
+                        {"$inc": {"available_credits": -extra}, "$set": {"updated_at": now}},
+                        return_document=ReturnDocument.AFTER,
                         session=session,
                     )
-                    self.reservations.update_one(
-                        {"job_id": job_id, "billing_account_id": account_id},
-                        {
-                            "$set": {
-                                "status": "committed",
-                                "final_credits": final_amount,
-                                "updated_at": now,
-                            }
-                        },
-                        session=session,
-                    )
-                    self.ledger.insert_one(entry, session=session)
-                    if refund_entry:
-                        self.ledger.insert_one(refund_entry, session=session)
-        except Exception:
-            self._release_commit_claim(account_id, job_id)
-            raise
+                    if not wallet:
+                        current = self.wallets.find_one(
+                            {"billing_account_id": account_id},
+                            session=session,
+                        ) or {}
+                        raise InsufficientCredits(extra, int(current.get("available_credits") or 0))
+
+                self._consume_lots(account_id, final_amount, session=session)
+                self.wallets.update_one(
+                    {"billing_account_id": account_id},
+                    {
+                        "$inc": {"reserved_credits": -reserved, "available_credits": refund},
+                        "$set": {"updated_at": now},
+                    },
+                    session=session,
+                )
+                self.reservations.update_one(
+                    {"job_id": job_id, "billing_account_id": account_id, "status": "committing"},
+                    {
+                        "$set": {
+                            "status": "committed",
+                            "final_credits": final_amount,
+                            "updated_at": now,
+                        }
+                    },
+                    session=session,
+                )
+                self.ledger.insert_one(entry, session=session)
+                if refund_entry:
+                    self.ledger.insert_one(refund_entry, session=session)
 
         return entry
 
