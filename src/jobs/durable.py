@@ -212,7 +212,7 @@ class DurableJobStore:
     def mark_running(self, job_id: str) -> None:
         now = utc_now()
         job = self.jobs.find_one_and_update(
-            {"job_id": job_id},
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
             {
                 "$inc": {"attempt_count": 1},
                 "$set": {
@@ -230,7 +230,11 @@ class DurableJobStore:
 
         attempt_count = int(job.get("attempt_count") or 0)
         self.jobs.update_one(
-            {"job_id": job_id, "attempt_count": attempt_count},
+            {
+                "job_id": job_id,
+                "attempt_count": attempt_count,
+                "status": {"$nin": list(TERMINAL_STATUSES)},
+            },
             {"$set": {"retry_count": max(attempt_count - 1, 0)}},
         )
 
@@ -325,22 +329,25 @@ class DurableJobStore:
         job_id: str,
         result: Mapping[str, Any] | None = None,
     ) -> None:
+        now = utc_now()
         self.jobs.update_one(
-            {"job_id": job_id},
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
             {
                 "$set": {
                     "status": SUCCEEDED,
                     "result": _normalise(result or {}),
                     "error": None,
                     "error_state": None,
-                    "completed_at": utc_now(),
-                    "updated_at": utc_now(),
+                    "completed_at": now,
+                    "updated_at": now,
                 },
             },
         )
 
     def mark_failed(self, job_id: str, error: str) -> str:
         job = self.get(job_id) or {}
+        if job.get("status") in TERMINAL_STATUSES:
+            return str(job.get("status"))
         attempt_count = int(job.get("attempt_count") or 0)
         retry_count = max(attempt_count - 1, 0)
         max_attempts = int(job.get("max_attempts") or 1)
@@ -360,7 +367,13 @@ class DurableJobStore:
         if status == DEAD_LETTER:
             update["dead_lettered_at"] = utc_now()
             update["completed_at"] = utc_now()
-        self.jobs.update_one({"job_id": job_id}, {"$set": update})
+        result = self.jobs.update_one(
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
+            {"$set": update},
+        )
+        if getattr(result, "modified_count", 0) != 1:
+            current = self.get(job_id) or {}
+            return str(current.get("status") or status)
         return status
 
     def reset_for_retry(self, job_id: str, clear_workflow: bool = False) -> None:

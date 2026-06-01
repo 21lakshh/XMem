@@ -9,11 +9,13 @@ os.environ.setdefault("NEO4J_PASSWORD", "test-neo4j-password")
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 
 from src.jobs.durable import (
+    CANCELLED,
     DEAD_LETTER,
     FAILED,
     QUEUED,
     RUNNING,
     SUCCEEDED,
+    DurableJobStore,
     idempotency_key,
     redact_payload,
     run_job,
@@ -93,6 +95,107 @@ class FakeJobStore:
     def reset_for_retry(self, job_id):
         assert job_id == self.job["job_id"]
         self.job["status"] = QUEUED
+
+
+class _UpdateResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
+
+
+class _FakeCollection:
+    def __init__(self, doc):
+        self.doc = dict(doc)
+
+    def _matches(self, query):
+        for key, expected in query.items():
+            actual = self.doc.get(key)
+            if isinstance(expected, dict) and "$nin" in expected:
+                if actual in expected["$nin"]:
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
+    def _apply(self, update):
+        for key, value in update.get("$inc", {}).items():
+            self.doc[key] = self.doc.get(key, 0) + value
+        for key, value in update.get("$set", {}).items():
+            self.doc[key] = value
+
+    def find_one(self, query):
+        return dict(self.doc) if self._matches(query) else None
+
+    def find_one_and_update(self, query, update, return_document=False):
+        if not self._matches(query):
+            return None
+        before = dict(self.doc)
+        self._apply(update)
+        return dict(self.doc) if return_document else before
+
+    def update_one(self, query, update):
+        if not self._matches(query):
+            return _UpdateResult(0)
+        self._apply(update)
+        return _UpdateResult(1)
+
+
+def _durable_store_with_doc(doc):
+    store = DurableJobStore.__new__(DurableJobStore)
+    store.jobs = _FakeCollection(doc)
+    return store
+
+
+def test_terminal_jobs_are_not_overwritten_by_late_workflow_updates():
+    store = _durable_store_with_doc({
+        "job_id": "job-1",
+        "status": CANCELLED,
+        "attempt_count": 0,
+        "retry_count": 0,
+    })
+
+    store.mark_running("job-1")
+    store.mark_succeeded("job-1", {"ok": True})
+    status = store.mark_failed("job-1", "late failure")
+
+    job = store.get("job-1")
+    assert status == CANCELLED
+    assert job["status"] == CANCELLED
+    assert job["attempt_count"] == 0
+    assert "result" not in job
+    assert "error" not in job
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_workflow_reraises_transient_cancel_errors(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    module_path = Path(__file__).parents[1] / "src/api/routes/v2/temporal_client.py"
+    spec = importlib.util.spec_from_file_location("temporal_client_under_test", module_path)
+    temporal_client = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(temporal_client)
+
+    class FakeHandle:
+        async def cancel(self):
+            raise RuntimeError("connection refused")
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id):
+            assert workflow_id == "workflow-1"
+            return FakeHandle()
+
+    async def fake_get_temporal_client():
+        return FakeClient()
+
+    monkeypatch.setattr(
+        temporal_client,
+        "get_temporal_client",
+        fake_get_temporal_client,
+    )
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        await temporal_client.cancel_job_workflow({"workflow_id": "workflow-1"})
 
 
 @pytest.mark.asyncio

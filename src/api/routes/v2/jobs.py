@@ -133,7 +133,11 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
         return _error(request, "Job not found.", 404, elapsed_ms(start))
     if job.get("status") not in {QUEUED, RUNNING}:
         return _error(request, "Only queued or running jobs can be cancelled.", 409, elapsed_ms(start))
-    await cancel_job_workflow(job)
+    try:
+        await cancel_job_workflow(job)
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
     await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
     await asyncio.to_thread(_mark_scanner_job_cancelled, job)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)

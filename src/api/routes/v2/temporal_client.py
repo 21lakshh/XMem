@@ -102,11 +102,15 @@ async def cancel_job_workflow(job: Dict[str, Any]) -> None:
     try:
         await handle.cancel()
     except Exception as exc:
-        logger.warning(
-            "Failed to cancel Temporal workflow %s; it may have already completed: %s",
-            workflow_id,
-            exc,
-        )
+        message = str(exc).lower()
+        if "not found" in message or "already completed" in message:
+            logger.info(
+                "Temporal workflow %s was already absent or complete during cancellation: %s",
+                workflow_id,
+                exc,
+            )
+            return
+        raise
 
 
 async def _record_temporal_ids(
