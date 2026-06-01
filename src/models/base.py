@@ -9,6 +9,7 @@ Provider = Literal[
     "claude",
     "openai",
     "deepseek",
+    "groq",
     "mimo",
     "openrouter",
     "bedrock",
