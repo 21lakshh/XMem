@@ -23,7 +23,7 @@ from src.billing import (
     release_job_billing,
     release_job_reservation,
 )
-from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
+from src.jobs.durable import CANCELLED, DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
 
 router = APIRouter(
     prefix="/v2/jobs",
@@ -159,15 +159,17 @@ async def cancel_job(job_id: str, request: Request, user: dict = Depends(require
     job = await read_user_job(job_id, user_id)
     if not job:
         return _error(request, "Job not found.", 404, elapsed_ms(start))
-    if job.get("status") not in {QUEUED, RUNNING}:
-        return _error(request, "Only queued or running jobs can be cancelled.", 409, elapsed_ms(start))
-    try:
-        await cancel_job_workflow(job)
-    except Exception as exc:
-        error = str(exc) or exc.__class__.__name__
-        return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
+    if job.get("status") not in {QUEUED, RUNNING, CANCELLED}:
+        return _error(request, "Only queued, running, or already-cancelled jobs can be cancelled.", 409, elapsed_ms(start))
+    if job.get("status") != CANCELLED:
+        try:
+            await cancel_job_workflow(job)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            return _error(request, f"Cancel failed to reach workflow: {error}", 503, elapsed_ms(start))
+        await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
+        await asyncio.to_thread(_mark_scanner_job_cancelled, job)
+        job = await asyncio.to_thread(get_default_job_store().get, job_id)
     await asyncio.to_thread(release_job_billing, job, "cancelled")
-    await asyncio.to_thread(get_default_job_store().mark_cancelled, job_id)
-    await asyncio.to_thread(_mark_scanner_job_cancelled, job)
     job = await asyncio.to_thread(get_default_job_store().get, job_id)
     return _wrap(request, job_status_data(job), elapsed_ms(start))
