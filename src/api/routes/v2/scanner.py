@@ -15,7 +15,15 @@ from src.api.routes.v2.secrets import store_scanner_pat
 from src.api.routes.v2.shared import _error, _wrap, accepted_job, elapsed_ms, job_status_data, read_user_job
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse
-from src.jobs.durable import get_default_job_store
+from src.jobs.durable import (
+    CANCELLED,
+    DEAD_LETTER,
+    FAILED,
+    QUEUED,
+    SUCCEEDED,
+    get_default_job_store,
+    new_attempt_id,
+)
 
 logger = logging.getLogger("xmem.api.routes.v2.scanner")
 
@@ -30,6 +38,20 @@ def _as_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _scanner_phase_status_from_durable(
+    durable_job: Dict[str, Any],
+    phase2_only: bool,
+) -> tuple[str, str]:
+    status = durable_job.get("status")
+    if status == SUCCEEDED:
+        return "complete", "complete"
+    if status in {FAILED, DEAD_LETTER}:
+        return ("complete", "failed") if phase2_only else ("failed", "pending")
+    if status == CANCELLED:
+        return ("complete", "cancelled") if phase2_only else ("cancelled", "pending")
+    return ("complete", "running") if phase2_only else ("running", "pending")
 
 
 @router.post("/scan", summary="Start a durable v2 GitHub repository scan")
@@ -129,8 +151,9 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
         "force_full": req.force_full,
         "remote_sha": remote_sha,
     }
+    durable_store = get_default_job_store()
     durable_job, created = await asyncio.to_thread(
-        get_default_job_store().enqueue,
+        durable_store.enqueue,
         job_type=durable_type,
         payload=durable_payload,
         idempotency_fields={
@@ -155,14 +178,14 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
                 req.pat,
             )
             await asyncio.to_thread(
-                get_default_job_store().update_payload,
+                durable_store.update_payload,
                 durable_job["job_id"],
                 temporal_payload,
             )
-            durable_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
+            durable_job = await asyncio.to_thread(durable_store.get, durable_job["job_id"]) or durable_job
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
-            await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)
+            await asyncio.to_thread(durable_store.mark_failed, durable_job["job_id"], error)
             return JSONResponse({
                 "status": "error",
                 "durable_job_id": durable_job["job_id"],
@@ -173,7 +196,21 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
     elif isinstance(durable_job.get("payload"), dict) and durable_job["payload"].get("github_credential_ref"):
         temporal_payload["github_credential_ref"] = durable_job["payload"]["github_credential_ref"]
 
+    should_start = created or (durable_job.get("status") == QUEUED and not durable_job.get("workflow_id"))
+    if should_start:
+        workflow_id = durable_job.get("workflow_id") or f"{durable_job['job_id']}:{new_attempt_id()}"
+        reserved = await asyncio.to_thread(
+            durable_store.reserve_workflow_start,
+            durable_job["job_id"],
+            workflow_id,
+        )
+        durable_job = await asyncio.to_thread(durable_store.get, durable_job["job_id"]) or durable_job
+    else:
+        reserved = False
+
     started_at = time.time()
+    phase1_status, phase2_status = _scanner_phase_status_from_durable(durable_job, phase2_only)
+    scanner_error = durable_job.get("error") if "failed" in {phase1_status, phase2_status} else None
     store.upsert_scanner_job(
         job_id=scanner_job_id,
         username=username,
@@ -181,24 +218,23 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
         repo=repo,
         branch=branch,
         url=clone_url,
-        phase1_status="complete" if phase2_only else "running",
-        phase2_status="running" if phase2_only else "pending",
+        phase1_status=phase1_status,
+        phase2_status=phase2_status,
         started_at=started_at,
-        error=None,
+        error=scanner_error,
         durable_job_id=durable_job["job_id"],
         retry_count=int(durable_job.get("retry_count") or 0),
         timeout_seconds=float(durable_job.get("timeout_seconds") or scanner_v1.SCANNER_DURABLE_TIMEOUT_SECONDS),
     )
     store.upsert_user_repo_entry(username, org, repo, branch)
 
-    should_start = created or (durable_job.get("status") == "queued" and not durable_job.get("workflow_id"))
-    if should_start:
+    if reserved:
         try:
             await start_job_workflow(durable_job, payload=temporal_payload)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
-            await asyncio.to_thread(get_default_job_store().mark_failed, durable_job["job_id"], error)
-            failed_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
+            await asyncio.to_thread(durable_store.mark_failed, durable_job["job_id"], error)
+            failed_job = await asyncio.to_thread(durable_store.get, durable_job["job_id"]) or durable_job
             store.upsert_scanner_job(
                 job_id=scanner_job_id,
                 username=username,
@@ -222,7 +258,8 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
                 "repo": repo,
                 "error": f"Failed to start durable scanner workflow: {error}",
             }, status_code=503)
-        durable_job = await asyncio.to_thread(get_default_job_store().get, durable_job["job_id"]) or durable_job
+        durable_job = await asyncio.to_thread(durable_store.get, durable_job["job_id"]) or durable_job
+        phase1_status, phase2_status = _scanner_phase_status_from_durable(durable_job, phase2_only)
 
     return accepted_job(
         request,
@@ -237,8 +274,8 @@ async def start_scan_v2(req: scanner_v1.ScanRequest, request: Request, user: dic
             "commit_sha": remote_sha,
             "reused": False,
             "phase2_only": phase2_only,
-            "phase1_status": "complete" if phase2_only else "running",
-            "phase2_status": "running" if phase2_only else "pending",
+            "phase1_status": phase1_status,
+            "phase2_status": phase2_status,
         },
     )
 

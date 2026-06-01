@@ -114,6 +114,19 @@ def test_scanner_cancel_marks_running_phase_cancelled(monkeypatch):
     assert fake_store.updated["durable_job_id"] == "durable-1"
 
 
+def test_scanner_phase_status_reflects_existing_failed_durable_job():
+    from src.api.routes.v2 import scanner
+
+    assert scanner._scanner_phase_status_from_durable(
+        {"status": "failed"},
+        phase2_only=False,
+    ) == ("failed", "pending")
+    assert scanner._scanner_phase_status_from_durable(
+        {"status": "failed"},
+        phase2_only=True,
+    ) == ("complete", "failed")
+
+
 @pytest.mark.asyncio
 async def test_cancel_job_workflow_ignores_completed_workflow(monkeypatch):
     from src.api.routes.v2 import temporal_client
