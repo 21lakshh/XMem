@@ -378,6 +378,7 @@ def test_v2_cancel_mark_failure_releases_billing_after_signal(monkeypatch):
         raise RuntimeError("cancel status write failed")
 
     monkeypatch.setattr(jobs_v2, "get_default_job_store", lambda: store)
+    monkeypatch.setattr(durable, "get_default_job_store", lambda: store)
     monkeypatch.setattr(jobs_v2, "cancel_job_workflow", fake_cancel_job_workflow)
     monkeypatch.setattr(store, "mark_cancelled", fail_mark_cancelled)
     monkeypatch.setattr(
