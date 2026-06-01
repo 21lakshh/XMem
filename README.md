@@ -24,6 +24,12 @@
 <hr>
 
 <p align="center">
+  <a href="README.md">English</a> &nbsp;&bull;&nbsp;
+  <a href="README.zh-CN.md">简体中文</a> &nbsp;&bull;&nbsp;
+  <a href="README.ja.md">日本語</a>
+</p>
+
+<p align="center">
   <a href="#demo">Demo</a> &nbsp;&bull;&nbsp;
   <a href="#features">Features</a> &nbsp;&bull;&nbsp;
   <a href="#architecture">Architecture</a> &nbsp;&bull;&nbsp;
