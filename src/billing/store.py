@@ -333,7 +333,7 @@ class BillingStore:
                 raise BillingStoreError(
                     f"Reservation for job {job_id} belongs to a different billing account"
                 )
-            return existing
+            return {**existing, "created": False}
 
         now = utc_now()
         if self._in_memory:
@@ -371,7 +371,7 @@ class BillingStore:
                     "created_at": now,
                 }
             )
-            return dict(reservation)
+            return {**reservation, "created": True}
 
         from pymongo import ReturnDocument
 
@@ -404,7 +404,7 @@ class BillingStore:
                     and current.get("billing_account_id") == account_id
                     and current.get("status") != "reserving"
                 ):
-                    return current
+                    return {**current, "created": False}
                 raise BillingStoreError(f"Reservation for job {job_id} is already active")
             reservation = _without_id(reserved_doc) or {}
             version = int(reservation.get("version") or 1)
@@ -431,7 +431,7 @@ class BillingStore:
                     and current.get("billing_account_id") == account_id
                     and current.get("status") != "reserving"
                 ):
-                    return current
+                    return {**current, "created": False}
                 if current and current.get("billing_account_id") == account_id:
                     raise BillingStoreError(
                         f"Reservation for job {job_id} is already being created"
@@ -474,7 +474,7 @@ class BillingStore:
                 "created_at": now,
             }
         )
-        return reservation
+        return {**reservation, "created": True}
 
     def get_reservation(self, job_id: str) -> Optional[dict[str, Any]]:
         if self._in_memory:

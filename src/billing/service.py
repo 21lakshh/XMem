@@ -103,6 +103,7 @@ class BillingService:
             reserved_credits=int(reservation.get("reserved_credits") or 0),
             status=reservation.get("status", "active"),
             available_credits=int(wallet.get("available_credits") or 0),
+            created=bool(reservation.get("created")),
         )
 
     def reserve_job_credits(

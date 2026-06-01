@@ -68,6 +68,21 @@ def test_reservation_debit_and_refund_flow():
     assert {"reserve", "debit", "refund"}.issubset(ledger_types)
 
 
+def test_reused_reservation_is_marked_not_created():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+
+    first = svc.reserve_credits(account["id"], "job_1", 1000)
+    second = svc.reserve_credits(account["id"], "job_1", 1000)
+
+    summary = svc.get_billing_summary(user)
+    assert first.created
+    assert not second.created
+    assert summary.available_credits == 9000
+    assert summary.reserved_credits == 1000
+
+
 def test_failed_job_releases_reserved_credits():
     svc = service()
     user = {"id": "user_1"}

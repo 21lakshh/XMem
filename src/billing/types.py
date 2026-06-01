@@ -61,6 +61,7 @@ class ReservationResult(BaseModel):
     reserved_credits: int
     status: Literal["active", "committed", "released", "expired"]
     available_credits: int
+    created: bool = False
 
 
 class CheckoutRequest(BaseModel):
