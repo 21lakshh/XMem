@@ -38,6 +38,16 @@
   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=XortexAI/XMem&type=date&legend=top-left" />
 </picture>
 
+## Updates / News
+- **[1 June 2026]** XMem now has a native Golang implementation of its memory layer. Built for higher throughput, lower latency, and production-scale deployments where memory needs to operate reliably across millions of interactions.
+- **[25 May 2026]** Local workspace support is now live. Set up XMem locally in just 3 commands and start building with memory in minutes. See [Local.md](https://github.com/XortexAI/XMem/blob/main/Local.md) for setup instructions.
+ ```bash
+npx create-xmem@latest
+cd xmem
+npm run dev
+```
+
+
 ## What is XMem?
 
 Every conversation with an LLM starts from scratch. Switch tools, switch providers, come back next week and all context is gone.
