@@ -40,12 +40,20 @@ class FakeJobStore:
             "max_attempts": max_attempts,
             "retry_count": 0,
             "attempt_count": 0,
+            "workflow_id": None,
         }
         self.jobs[job["job_id"]] = job
         return job, True
 
     def get(self, job_id):
         return self.jobs.get(job_id)
+
+    def reserve_workflow_start(self, job_id, workflow_id):
+        job = self.jobs[job_id]
+        if job["status"] != "queued" or job.get("workflow_id"):
+            return False
+        job["workflow_id"] = workflow_id
+        return True
 
 
 def _build_app(monkeypatch, user=None):
