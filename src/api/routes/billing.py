@@ -303,7 +303,7 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
     notes = payment.get("notes") or subscription.get("notes") or order.get("notes") or {}
     user_id = str(notes.get("user_id") or "")
     package_id = str(notes.get("package_id") or "")
-    payment_id = str(payment.get("id") or payload.get("id") or "")
+    payment_id = str(payment.get("id") or "")
     order_id = str(payment.get("order_id") or order.get("id") or "")
     subscription_id = str(payment.get("subscription_id") or subscription.get("id") or "")
 
@@ -317,21 +317,27 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
         return {"status": "ignored"}
 
     if event_name in {"payment.captured", "order.paid", "subscription.charged"}:
-        if package_id == "pro":
+        if not payment_id:
+            logger.info("Ignoring Razorpay webhook without payment id: %s", event_name)
+        elif package_id == "pro" and (subscription_id or order_id):
             await asyncio.to_thread(
                 service.grant_pro_subscription,
                 user_id=user_id,
-                payment_id=payment_id or event_id,
-                subscription_id=subscription_id or order_id or event_id,
+                payment_id=payment_id,
+                subscription_id=subscription_id or order_id,
             )
-        elif package_id in billing_config.TOP_UP_PACKS:
+        elif package_id == "pro":
+            logger.info("Ignoring Razorpay pro webhook without subscription/order id: %s", event_name)
+        elif package_id in billing_config.TOP_UP_PACKS and order_id:
             await asyncio.to_thread(
                 service.grant_topup,
                 user_id=user_id,
                 pack_id=package_id,
-                payment_id=payment_id or event_id,
-                order_id=order_id or event_id,
+                payment_id=payment_id,
+                order_id=order_id,
             )
+        elif package_id in billing_config.TOP_UP_PACKS:
+            logger.info("Ignoring Razorpay top-up webhook without order id: %s", event_name)
 
     first_seen = await asyncio.to_thread(
         service.store.mark_payment_event,
