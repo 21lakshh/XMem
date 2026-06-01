@@ -121,9 +121,9 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
     billing_account_id = payload.get("billing_account_id")
     billing_reservation_created = False
-    if billing_account_id:
-        billing_service = get_default_billing_service()
-        try:
+    try:
+        if billing_account_id:
+            billing_service = get_default_billing_service()
             estimate = billing_service.estimate_required_credits(job.get("job_type") or "", payload)
             reservation = await asyncio.to_thread(
                 billing_service.reserve_credits,
@@ -135,13 +135,11 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(require_
             payload["billing_estimate"] = estimate.model_dump()
             billing_reservation_created = reservation.created
             await asyncio.to_thread(get_default_job_store().update_payload, job_id, payload)
-        except InsufficientCredits as exc:
-            return _error(request, str(exc), 402, elapsed_ms(start))
-
-    try:
         await asyncio.to_thread(get_default_job_store().reset_for_retry, job_id, True)
         job = await asyncio.to_thread(get_default_job_store().get, job_id)
         await start_job_workflow(job)
+    except InsufficientCredits as exc:
+        return _error(request, str(exc), 402, elapsed_ms(start))
     except Exception as exc:
         if billing_reservation_created and billing_account_id:
             await asyncio.to_thread(release_job_reservation, billing_account_id, job_id)
