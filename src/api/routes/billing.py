@@ -318,7 +318,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
 
     if event_name in {"payment.captured", "order.paid", "subscription.charged"}:
         if not payment_id:
-            logger.info("Ignoring Razorpay webhook without payment id: %s", event_name)
+            logger.warning("Razorpay webhook missing payment id for grantable event: %s", event_name)
+            raise HTTPException(status_code=400, detail="Webhook payment id is required for credit grant")
         elif package_id == "pro" and (subscription_id or order_id):
             await asyncio.to_thread(
                 service.grant_pro_subscription,
@@ -327,7 +328,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
                 subscription_id=subscription_id or order_id,
             )
         elif package_id == "pro":
-            logger.info("Ignoring Razorpay pro webhook without subscription/order id: %s", event_name)
+            logger.warning("Razorpay pro webhook missing subscription/order id: %s", event_name)
+            raise HTTPException(status_code=400, detail="Webhook subscription or order id is required for credit grant")
         elif package_id in billing_config.TOP_UP_PACKS and order_id:
             await asyncio.to_thread(
                 service.grant_topup,
@@ -337,7 +339,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
                 order_id=order_id,
             )
         elif package_id in billing_config.TOP_UP_PACKS:
-            logger.info("Ignoring Razorpay top-up webhook without order id: %s", event_name)
+            logger.warning("Razorpay top-up webhook missing order id: %s", event_name)
+            raise HTTPException(status_code=400, detail="Webhook order id is required for credit grant")
 
     first_seen = await asyncio.to_thread(
         service.store.mark_payment_event,
