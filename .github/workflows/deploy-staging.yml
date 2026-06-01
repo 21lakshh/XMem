@@ -73,46 +73,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Explain why staging was not deployed
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = context.payload.pull_request.number;
-            const body = [
-              '## ℹ️ Staging deploy skipped (fork PR)',
-              '',
-              'This pull request comes from a **fork**, so GitHub does not allow:',
-              '- Creating deployment records (`deployments: write` on `GITHUB_TOKEN`)',
-              '- Access to repository secrets (staging SSH keys, etc.)',
-              '',
-              'This is expected GitHub security behavior — not a workflow bug.',
-              '',
-              '**What still runs:** unit/E2E tests (`Test Suite`), Docker build check, etc.',
-              '',
-              '**To get a staging deploy:** a maintainer can push the branch to this repo and open a same-repo PR, or run **Deploy PR to Staging → Run workflow** manually after review.',
-            ].join('\n');
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-            });
-            const marker = 'Staging deploy skipped (fork PR)';
-            const existing = comments.find((c) => c.body?.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body,
-              });
-            }
+        run: |
+          echo "Staging deploy skipped for fork PR. This is expected and keeps repository secrets unavailable to untrusted code."
+          {
+            echo "### Staging deploy skipped for fork PR"
+            echo
+            echo "This pull request comes from a fork, so GitHub does not expose staging SSH secrets or allow deployment records from this workflow token."
+            echo
+            echo "Code checks still run. A maintainer can deploy after review by pushing the branch to this repository or running the staging workflow manually."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ── 1. Deploy PR branch to staging EC2 (same-repo PRs + manual dispatch) ───
   deploy:
@@ -249,7 +218,10 @@ jobs:
 
       # ── Post deployment report as PR comment ──────────────────────────────
       - name: Post result to PR
-        if: always() && github.event_name == 'pull_request'
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
