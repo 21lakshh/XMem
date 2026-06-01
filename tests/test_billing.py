@@ -9,7 +9,7 @@ import pytest
 
 from src.billing import store as billing_store
 from src.billing.service import BillingService
-from src.billing.store import BillingStore, InsufficientCredits, utc_now
+from src.billing.store import BillingStore, BillingStoreError, InsufficientCredits, utc_now
 from src.utils import billing as billing_config
 
 
@@ -87,6 +87,32 @@ def test_insufficient_credits_blocks_reservation():
 
     with pytest.raises(InsufficientCredits):
         svc.reserve_credits(account["id"], "job_1", 10_001)
+
+
+def test_reservation_cannot_be_reused_by_another_account():
+    svc = service()
+    account_1 = svc.ensure_billing_account({"id": "user_1"})
+    account_2 = svc.ensure_billing_account({"id": "user_2"})
+
+    svc.reserve_credits(account_1["id"], "job_1", 100)
+
+    with pytest.raises(BillingStoreError):
+        svc.reserve_credits(account_2["id"], "job_1", 100)
+
+
+def test_duplicate_commit_does_not_double_debit():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+    svc.reserve_credits(account["id"], "job_1", 1000)
+
+    svc.commit_job_debit(account["id"], "job_1", 750)
+    svc.commit_job_debit(account["id"], "job_1", 750)
+
+    summary = svc.get_billing_summary(user)
+    debits = [entry for entry in svc.list_ledger(user) if entry["type"] == "debit"]
+    assert summary.available_credits == 9250
+    assert len(debits) == 1
 
 
 def test_pro_grant_is_idempotent_per_payment():

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -89,8 +90,9 @@ async def list_billing_plans() -> list[PlanPublic]:
 @router.get("/summary", response_model=BillingSummaryResponse)
 async def billing_summary(current_user: dict = Depends(require_auth)) -> BillingSummaryResponse:
     service = get_default_billing_service()
+    summary = await asyncio.to_thread(service.get_billing_summary, current_user)
     return BillingSummaryResponse(
-        summary=service.get_billing_summary(current_user),
+        summary=summary,
         plans=public_plans(),
         topups=public_topups(),
     )
@@ -109,7 +111,7 @@ async def create_razorpay_checkout(
     user_id = _user_id(current_user)
     package_type, package = _pack_or_plan(request.package_id)
     service = get_default_billing_service()
-    account = service.ensure_billing_account(current_user)
+    account = await asyncio.to_thread(service.ensure_billing_account, current_user)
 
     if request.package_id == "free":
         raise HTTPException(status_code=400, detail="Free plan does not require checkout")
@@ -129,7 +131,8 @@ async def create_razorpay_checkout(
                 notes=notes,
             )
             checkout_id = str(subscription["id"])
-            service.store.save_checkout(
+            await asyncio.to_thread(
+                service.store.save_checkout,
                 checkout_id,
                 {
                     "type": "subscription",
@@ -161,7 +164,8 @@ async def create_razorpay_checkout(
         raise HTTPException(status_code=502, detail="Razorpay checkout creation failed") from exc
 
     order_id = str(order["id"])
-    service.store.save_checkout(
+    await asyncio.to_thread(
+        service.store.save_checkout,
         order_id,
         {
             "type": package_type,
@@ -204,13 +208,24 @@ async def verify_razorpay_payment(
     user_id = _user_id(current_user)
 
     if request.razorpay_subscription_id:
+        checkout = await asyncio.to_thread(
+            service.store.get_checkout,
+            request.razorpay_subscription_id,
+        )
+        if not checkout:
+            raise HTTPException(status_code=400, detail="Unknown Razorpay subscription checkout")
+        if checkout.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Payment subscription does not belong to this user")
+        if checkout.get("package_id") != "pro":
+            raise HTTPException(status_code=400, detail="Payment subscription package mismatch")
         if not verify_subscription_signature(
             request.razorpay_subscription_id,
             request.razorpay_payment_id,
             request.razorpay_signature,
         ):
             raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
-        service.grant_pro_subscription(
+        await asyncio.to_thread(
+            service.grant_pro_subscription,
             user_id=user_id,
             payment_id=request.razorpay_payment_id,
             subscription_id=request.razorpay_subscription_id,
@@ -222,18 +237,27 @@ async def verify_razorpay_payment(
             request.razorpay_signature,
         ):
             raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
-        checkout = service.store.get_checkout(request.razorpay_order_id)
-        if checkout and checkout.get("user_id") != user_id:
+        checkout = await asyncio.to_thread(
+            service.store.get_checkout,
+            request.razorpay_order_id,
+        )
+        if not checkout:
+            raise HTTPException(status_code=400, detail="Unknown Razorpay payment order")
+        if checkout.get("user_id") != user_id:
             raise HTTPException(status_code=403, detail="Payment order does not belong to this user")
-        package_id = str((checkout or {}).get("package_id") or request.package_id)
+        if checkout.get("package_id") != request.package_id:
+            raise HTTPException(status_code=400, detail="Payment order package mismatch")
+        package_id = str(checkout.get("package_id"))
         if package_id == "pro":
-            service.grant_pro_subscription(
+            await asyncio.to_thread(
+                service.grant_pro_subscription,
                 user_id=user_id,
                 payment_id=request.razorpay_payment_id,
                 subscription_id=request.razorpay_order_id,
             )
         else:
-            service.grant_topup(
+            await asyncio.to_thread(
+                service.grant_topup,
                 user_id=user_id,
                 pack_id=package_id,
                 payment_id=request.razorpay_payment_id,
@@ -242,7 +266,8 @@ async def verify_razorpay_payment(
     else:
         raise HTTPException(status_code=400, detail="Missing Razorpay order or subscription id")
 
-    return VerifyPaymentResponse(summary=service.get_billing_summary(current_user))
+    summary = await asyncio.to_thread(service.get_billing_summary, current_user)
+    return VerifyPaymentResponse(summary=summary)
 
 
 @router.post("/razorpay/webhook")
@@ -255,7 +280,11 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
     except RazorpayConfigError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    payload = json.loads(body.decode("utf-8"))
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("Razorpay webhook body is not valid JSON: %s", exc)
+        raise HTTPException(status_code=400, detail="Webhook body must be valid JSON") from exc
     event_id = str(
         request.headers.get("x-razorpay-event-id")
         or payload.get("id")
@@ -263,7 +292,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
     )
     event_name = str(payload.get("event") or "")
     service = get_default_billing_service()
-    first_seen = service.store.mark_payment_event(
+    first_seen = await asyncio.to_thread(
+        service.store.mark_payment_event,
         event_id,
         {"event": event_name, "payload": payload},
     )
@@ -286,13 +316,15 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
 
     if event_name in {"payment.captured", "order.paid", "subscription.charged"}:
         if package_id == "pro":
-            service.grant_pro_subscription(
+            await asyncio.to_thread(
+                service.grant_pro_subscription,
                 user_id=user_id,
                 payment_id=payment_id or event_id,
                 subscription_id=subscription_id or order_id or event_id,
             )
         elif package_id in billing_config.TOP_UP_PACKS:
-            service.grant_topup(
+            await asyncio.to_thread(
+                service.grant_topup,
                 user_id=user_id,
                 pack_id=package_id,
                 payment_id=payment_id or event_id,
@@ -308,6 +340,7 @@ async def billing_ledger(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[LedgerEntryPublic]:
     service = get_default_billing_service()
+    entries = await asyncio.to_thread(service.list_ledger, current_user, limit)
     return [
         LedgerEntryPublic(
             id=str(entry["id"]),
@@ -319,5 +352,5 @@ async def billing_ledger(
             metadata=entry.get("metadata") or {},
             created_at=entry["created_at"],
         )
-        for entry in service.list_ledger(current_user, limit=limit)
+        for entry in entries
     ]

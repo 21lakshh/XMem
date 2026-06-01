@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Any, Mapping, Optional
 
 from src.billing.metering import estimate_required_credits as _estimate_required_credits
-from src.billing.store import BillingStore, InsufficientCredits, get_default_billing_store, utc_now
+from src.billing.store import BillingStore, get_default_billing_store, utc_now
 from src.billing.types import BillingSummary, CreditEstimate, CreditLotPublic, PlanPublic, ReservationResult, TopUpPackPublic
 from src.utils import billing as billing_config
 

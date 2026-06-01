@@ -1,7 +1,7 @@
 """Billing and credit ledger package."""
 
+from .store import InsufficientCredits
 from .service import (
-    InsufficientCredits,
     commit_job_billing,
     commit_job_debit,
     ensure_billing_account,

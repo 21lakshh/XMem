@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from src.config import settings
 
@@ -103,13 +103,18 @@ class BillingStore:
             self.usage_events = self._db["usage_events"]
             self.payments = self._db["billing_payments"]
 
+            self.accounts.create_index([("id", ASCENDING)], unique=True)
             self.accounts.create_index([("owner_type", ASCENDING), ("owner_id", ASCENDING)], unique=True)
             self.accounts.create_index([("razorpay_subscription_id", ASCENDING)])
             self.wallets.create_index([("billing_account_id", ASCENDING)], unique=True)
+            self.lots.create_index([("id", ASCENDING)], unique=True)
             self.lots.create_index([("billing_account_id", ASCENDING), ("expires_at", ASCENDING)])
+            self.ledger.create_index([("id", ASCENDING)], unique=True)
             self.ledger.create_index([("idempotency_key", ASCENDING)], unique=True)
             self.ledger.create_index([("billing_account_id", ASCENDING), ("created_at", ASCENDING)])
+            self.reservations.create_index([("id", ASCENDING)], unique=True)
             self.reservations.create_index([("job_id", ASCENDING)], unique=True)
+            self.payments.create_index([("id", ASCENDING)], unique=True, sparse=True)
             self.payments.create_index([("razorpay_event_id", ASCENDING)], unique=True, sparse=True)
             self.payments.create_index([("razorpay_payment_id", ASCENDING)], unique=True, sparse=True)
 
@@ -314,10 +319,18 @@ class BillingStore:
             raise ValueError("Reservation amount must be positive")
         existing = self.get_reservation(job_id)
         if existing and existing.get("status") in {"active", "committed"}:
+            if existing.get("billing_account_id") != account_id:
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                )
             return existing
 
         now = utc_now()
         if self._in_memory:
+            if existing and existing.get("billing_account_id") != account_id:
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                )
             wallet = self.get_wallet(account_id)
             if int(wallet.get("available_credits") or 0) < amount:
                 raise InsufficientCredits(amount, int(wallet.get("available_credits") or 0))
@@ -350,6 +363,74 @@ class BillingStore:
             )
             return dict(reservation)
 
+        from pymongo import ReturnDocument
+
+        if existing:
+            if existing.get("billing_account_id") != account_id:
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                )
+            reserved_doc = self.reservations.find_one_and_update(
+                {
+                    "job_id": job_id,
+                    "billing_account_id": account_id,
+                    "status": {"$nin": ["active", "committed", "reserving"]},
+                },
+                {
+                    "$set": {
+                        "status": "reserving",
+                        "reserved_credits": amount,
+                        "metadata": metadata or {},
+                        "updated_at": now,
+                    },
+                    "$inc": {"version": 1},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if not reserved_doc:
+                current = self.get_reservation(job_id)
+                if (
+                    current
+                    and current.get("billing_account_id") == account_id
+                    and current.get("status") != "reserving"
+                ):
+                    return current
+                raise BillingStoreError(f"Reservation for job {job_id} is already active")
+            reservation = _without_id(reserved_doc) or {}
+            version = int(reservation.get("version") or 1)
+        else:
+            reservation = {
+                "id": uuid.uuid4().hex,
+                "billing_account_id": account_id,
+                "job_id": job_id,
+                "reserved_credits": amount,
+                "status": "reserving",
+                "version": 1,
+                "metadata": metadata or {},
+                "created_at": now,
+                "updated_at": now,
+            }
+            try:
+                self.reservations.insert_one(reservation)
+            except Exception as exc:
+                if exc.__class__.__name__ != "DuplicateKeyError":
+                    raise
+                current = self.get_reservation(job_id)
+                if (
+                    current
+                    and current.get("billing_account_id") == account_id
+                    and current.get("status") != "reserving"
+                ):
+                    return current
+                if current and current.get("billing_account_id") == account_id:
+                    raise BillingStoreError(
+                        f"Reservation for job {job_id} is already being created"
+                    ) from exc
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                ) from exc
+            version = 1
+
         wallet = self.wallets.find_one_and_update(
             {"billing_account_id": account_id, "available_credits": {"$gte": amount}},
             {
@@ -359,22 +440,18 @@ class BillingStore:
             return_document=True,
         )
         if not wallet:
+            self.reservations.update_one(
+                {"job_id": job_id, "status": "reserving"},
+                {"$set": {"status": "released", "updated_at": now}},
+            )
             current = self.get_wallet(account_id)
             raise InsufficientCredits(amount, int(current.get("available_credits") or 0))
 
-        version = int((existing or {}).get("version") or 0) + 1
-        reservation = {
-            "id": (existing or {}).get("id") or uuid.uuid4().hex,
-            "billing_account_id": account_id,
-            "job_id": job_id,
-            "reserved_credits": amount,
-            "status": "active",
-            "version": version,
-            "metadata": metadata or {},
-            "created_at": (existing or {}).get("created_at") or now,
-            "updated_at": now,
-        }
-        self.reservations.update_one({"job_id": job_id}, {"$set": reservation}, upsert=True)
+        self.reservations.update_one(
+            {"job_id": job_id, "billing_account_id": account_id, "status": "reserving"},
+            {"$set": {"status": "active", "updated_at": now}},
+        )
+        reservation = self.get_reservation(job_id) or reservation
         self._insert_ledger(
             {
                 "id": uuid.uuid4().hex,
@@ -408,28 +485,21 @@ class BillingStore:
         duplicate = self.find_ledger_by_key(f"debit:{job_id}")
         if duplicate:
             return duplicate
-        reservation = self.get_reservation(job_id)
-        if not reservation:
-            raise BillingStoreError(f"No credit reservation exists for job {job_id}")
-        if reservation.get("status") == "committed":
-            existing = self.find_ledger_by_key(f"debit:{job_id}")
-            if existing:
-                return existing
-            raise BillingStoreError(f"Reservation for job {job_id} is already committed")
-        if reservation.get("status") != "active":
-            raise BillingStoreError(f"Reservation for job {job_id} is not active")
-
         now = utc_now()
+        reservation = self._claim_reservation_for_commit(account_id, job_id, final_amount, now)
+        if reservation.get("type") == "debit":
+            return reservation
         reserved = int(reservation.get("reserved_credits") or 0)
         extra = max(final_amount - reserved, 0)
         refund = max(reserved - final_amount, 0)
-        if extra:
-            if self._in_memory:
+
+        try:
+            if extra and self._in_memory:
                 wallet = self.get_wallet(account_id)
                 if int(wallet.get("available_credits") or 0) < extra:
                     raise InsufficientCredits(extra, int(wallet.get("available_credits") or 0))
                 _memory_wallets[account_id]["available_credits"] -= extra
-            else:
+            elif extra:
                 wallet = self.wallets.find_one_and_update(
                     {"billing_account_id": account_id, "available_credits": {"$gte": extra}},
                     {"$inc": {"available_credits": -extra}, "$set": {"updated_at": now}},
@@ -439,32 +509,35 @@ class BillingStore:
                     current = self.get_wallet(account_id)
                     raise InsufficientCredits(extra, int(current.get("available_credits") or 0))
 
-        self._consume_lots(account_id, final_amount)
-        if self._in_memory:
-            _memory_wallets[account_id]["reserved_credits"] -= reserved
-            _memory_wallets[account_id]["available_credits"] += refund
-            _memory_wallets[account_id]["updated_at"] = now
-            _memory_reservations[job_id]["status"] = "committed"
-            _memory_reservations[job_id]["final_credits"] = final_amount
-            _memory_reservations[job_id]["updated_at"] = now
-        else:
-            self.wallets.update_one(
-                {"billing_account_id": account_id},
-                {
-                    "$inc": {"reserved_credits": -reserved, "available_credits": refund},
-                    "$set": {"updated_at": now},
-                },
-            )
-            self.reservations.update_one(
-                {"job_id": job_id},
-                {
-                    "$set": {
-                        "status": "committed",
-                        "final_credits": final_amount,
-                        "updated_at": now,
-                    }
-                },
-            )
+            self._consume_lots(account_id, final_amount)
+            if self._in_memory:
+                _memory_wallets[account_id]["reserved_credits"] -= reserved
+                _memory_wallets[account_id]["available_credits"] += refund
+                _memory_wallets[account_id]["updated_at"] = now
+                _memory_reservations[job_id]["status"] = "committed"
+                _memory_reservations[job_id]["final_credits"] = final_amount
+                _memory_reservations[job_id]["updated_at"] = now
+            else:
+                self.wallets.update_one(
+                    {"billing_account_id": account_id},
+                    {
+                        "$inc": {"reserved_credits": -reserved, "available_credits": refund},
+                        "$set": {"updated_at": now},
+                    },
+                )
+                self.reservations.update_one(
+                    {"job_id": job_id, "billing_account_id": account_id},
+                    {
+                        "$set": {
+                            "status": "committed",
+                            "final_credits": final_amount,
+                            "updated_at": now,
+                        }
+                    },
+                )
+        except Exception:
+            self._release_commit_claim(account_id, job_id)
+            raise
 
         entry = {
             "id": uuid.uuid4().hex,
@@ -491,6 +564,75 @@ class BillingStore:
                 }
             )
         return entry
+
+    def _claim_reservation_for_commit(
+        self,
+        account_id: str,
+        job_id: str,
+        final_amount: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if self._in_memory:
+            reservation = self.get_reservation(job_id)
+            if not reservation:
+                raise BillingStoreError(f"No credit reservation exists for job {job_id}")
+            if reservation.get("billing_account_id") != account_id:
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                )
+            if reservation.get("status") == "committed":
+                existing = self.find_ledger_by_key(f"debit:{job_id}")
+                if existing:
+                    return existing
+                raise BillingStoreError(f"Reservation for job {job_id} is already committed")
+            if reservation.get("status") != "active":
+                raise BillingStoreError(f"Reservation for job {job_id} is not active")
+            _memory_reservations[job_id]["status"] = "committing"
+            _memory_reservations[job_id]["final_credits"] = final_amount
+            _memory_reservations[job_id]["updated_at"] = now
+            return reservation
+
+        from pymongo import ReturnDocument
+
+        reservation = self.reservations.find_one_and_update(
+            {"job_id": job_id, "billing_account_id": account_id, "status": "active"},
+            {
+                "$set": {
+                    "status": "committing",
+                    "final_credits": final_amount,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.BEFORE,
+        )
+        if reservation:
+            return _without_id(reservation) or {}
+
+        existing = self.find_ledger_by_key(f"debit:{job_id}")
+        if existing:
+            return existing
+        current = self.get_reservation(job_id)
+        if current and current.get("billing_account_id") != account_id:
+            raise BillingStoreError(
+                f"Reservation for job {job_id} belongs to a different billing account"
+            )
+        raise BillingStoreError(f"Reservation for job {job_id} is not active")
+
+    def _release_commit_claim(self, account_id: str, job_id: str) -> None:
+        if self._in_memory:
+            reservation = _memory_reservations.get(job_id)
+            if reservation and reservation.get("billing_account_id") == account_id:
+                reservation["status"] = "active"
+                reservation.pop("final_credits", None)
+                reservation["updated_at"] = utc_now()
+            return
+        self.reservations.update_one(
+            {"job_id": job_id, "billing_account_id": account_id, "status": "committing"},
+            {
+                "$set": {"status": "active", "updated_at": utc_now()},
+                "$unset": {"final_credits": ""},
+            },
+        )
 
     def release_reservation(
         self,
@@ -538,22 +680,35 @@ class BillingStore:
     def _consume_lots(self, account_id: str, amount: int) -> None:
         remaining = amount
         now = utc_now()
-        lots = list(self.active_lots(account_id))
-        for lot in lots:
-            if remaining <= 0:
+        while remaining > 0:
+            lots = list(self.active_lots(account_id))
+            if not lots:
                 break
-            take = min(remaining, int(lot.get("remaining_credits") or 0))
-            if take <= 0:
-                continue
-            remaining -= take
-            if self._in_memory:
-                _memory_lots[lot["id"]]["remaining_credits"] -= take
-                _memory_lots[lot["id"]]["updated_at"] = now
-            else:
-                self.lots.update_one(
-                    {"id": lot["id"]},
-                    {"$inc": {"remaining_credits": -take}, "$set": {"updated_at": now}},
+            progressed = False
+            for lot in lots:
+                if remaining <= 0:
+                    break
+                take = min(remaining, int(lot.get("remaining_credits") or 0))
+                if take <= 0:
+                    continue
+                if self._in_memory:
+                    _memory_lots[lot["id"]]["remaining_credits"] -= take
+                    _memory_lots[lot["id"]]["updated_at"] = now
+                    remaining -= take
+                    progressed = True
+                    continue
+                result = self.lots.update_one(
+                    {"id": lot["id"], "remaining_credits": {"$gte": take}},
+                    {
+                        "$inc": {"remaining_credits": -take},
+                        "$set": {"updated_at": now},
+                    },
                 )
+                if getattr(result, "modified_count", 0) == 1:
+                    remaining -= take
+                    progressed = True
+            if not progressed:
+                break
         if remaining > 0:
             raise BillingStoreError(
                 f"Wallet had credits but credit lots were short by {remaining}"
