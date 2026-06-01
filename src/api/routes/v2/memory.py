@@ -19,7 +19,7 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import start_job_workflow
 from src.api.schemas import APIResponse, BatchIngestRequest, IngestRequest, ScrapeRequest, StatusEnum
-from src.billing.service import InsufficientCredits, get_default_billing_service
+from src.billing import InsufficientCredits, get_default_billing_service
 from src.config import settings
 from src.jobs.durable import QUEUED, get_default_job_store, idempotency_key, new_attempt_id, stable_hash
 

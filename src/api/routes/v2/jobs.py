@@ -17,7 +17,7 @@ from src.api.routes.v2.shared import (
 )
 from src.api.routes.v2.temporal_client import cancel_job_workflow, start_job_workflow
 from src.api.schemas import APIResponse
-from src.billing.service import InsufficientCredits, get_default_billing_service, release_job_billing
+from src.billing import InsufficientCredits, get_default_billing_service, release_job_billing
 from src.jobs.durable import DEAD_LETTER, QUEUED, RUNNING, get_default_job_store
 
 router = APIRouter(
