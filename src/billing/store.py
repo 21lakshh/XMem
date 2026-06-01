@@ -285,10 +285,6 @@ class BillingStore:
             "metadata": metadata or {},
             "created_at": now,
         }
-        duplicate = self._insert_ledger(ledger_entry)
-        if duplicate:
-            return duplicate
-
         lot = {
             "id": uuid.uuid4().hex,
             "billing_account_id": account_id,
@@ -300,6 +296,9 @@ class BillingStore:
             "updated_at": now,
         }
         if self._in_memory:
+            duplicate = self.find_ledger_by_key(idempotency_key)
+            if duplicate:
+                return duplicate
             _memory_lots[lot["id"]] = lot
             wallet = _memory_wallets.setdefault(
                 account_id,
@@ -307,14 +306,32 @@ class BillingStore:
             )
             wallet["available_credits"] += amount
             wallet["updated_at"] = now
+            self._insert_ledger(ledger_entry)
             return dict(ledger_entry)
 
-        self.lots.insert_one(lot)
-        self.wallets.update_one(
-            {"billing_account_id": account_id},
-            {"$inc": {"available_credits": amount}, "$set": {"updated_at": now}},
-            upsert=True,
-        )
+        try:
+            with self._client.start_session() as session:
+                with session.start_transaction():
+                    existing = self.ledger.find_one(
+                        {"idempotency_key": idempotency_key},
+                        session=session,
+                    )
+                    if existing:
+                        return _without_id(existing) or {}
+                    self.lots.insert_one(lot, session=session)
+                    self.wallets.update_one(
+                        {"billing_account_id": account_id},
+                        {"$inc": {"available_credits": amount}, "$set": {"updated_at": now}},
+                        upsert=True,
+                        session=session,
+                    )
+                    self.ledger.insert_one(ledger_entry, session=session)
+        except Exception as exc:
+            if _is_duplicate_key_error(exc):
+                existing = self.find_ledger_by_key(idempotency_key)
+                if existing:
+                    return existing
+            raise
         return ledger_entry
 
     def reserve_credits(
@@ -503,52 +520,6 @@ class BillingStore:
         extra = max(final_amount - reserved, 0)
         refund = max(reserved - final_amount, 0)
 
-        try:
-            if extra and self._in_memory:
-                wallet = self.get_wallet(account_id)
-                if int(wallet.get("available_credits") or 0) < extra:
-                    raise InsufficientCredits(extra, int(wallet.get("available_credits") or 0))
-                _memory_wallets[account_id]["available_credits"] -= extra
-            elif extra:
-                wallet = self.wallets.find_one_and_update(
-                    {"billing_account_id": account_id, "available_credits": {"$gte": extra}},
-                    {"$inc": {"available_credits": -extra}, "$set": {"updated_at": now}},
-                    return_document=True,
-                )
-                if not wallet:
-                    current = self.get_wallet(account_id)
-                    raise InsufficientCredits(extra, int(current.get("available_credits") or 0))
-
-            self._consume_lots(account_id, final_amount)
-            if self._in_memory:
-                _memory_wallets[account_id]["reserved_credits"] -= reserved
-                _memory_wallets[account_id]["available_credits"] += refund
-                _memory_wallets[account_id]["updated_at"] = now
-                _memory_reservations[job_id]["status"] = "committed"
-                _memory_reservations[job_id]["final_credits"] = final_amount
-                _memory_reservations[job_id]["updated_at"] = now
-            else:
-                self.wallets.update_one(
-                    {"billing_account_id": account_id},
-                    {
-                        "$inc": {"reserved_credits": -reserved, "available_credits": refund},
-                        "$set": {"updated_at": now},
-                    },
-                )
-                self.reservations.update_one(
-                    {"job_id": job_id, "billing_account_id": account_id},
-                    {
-                        "$set": {
-                            "status": "committed",
-                            "final_credits": final_amount,
-                            "updated_at": now,
-                        }
-                    },
-                )
-        except Exception:
-            self._release_commit_claim(account_id, job_id)
-            raise
-
         entry = {
             "id": uuid.uuid4().hex,
             "billing_account_id": account_id,
@@ -559,20 +530,85 @@ class BillingStore:
             "metadata": metadata or {},
             "created_at": now,
         }
-        self._insert_ledger(entry)
+        refund_entry = None
         if refund:
-            self._insert_ledger(
-                {
-                    "id": uuid.uuid4().hex,
-                    "billing_account_id": account_id,
-                    "type": "refund",
-                    "amount": refund,
-                    "job_id": job_id,
-                    "idempotency_key": f"refund:{job_id}",
-                    "metadata": {"reason": "unused_reservation"},
-                    "created_at": now,
-                }
-            )
+            refund_entry = {
+                "id": uuid.uuid4().hex,
+                "billing_account_id": account_id,
+                "type": "refund",
+                "amount": refund,
+                "job_id": job_id,
+                "idempotency_key": f"refund:{job_id}",
+                "metadata": {"reason": "unused_reservation"},
+                "created_at": now,
+            }
+
+        try:
+            if self._in_memory:
+                if extra:
+                    wallet = self.get_wallet(account_id)
+                    if int(wallet.get("available_credits") or 0) < extra:
+                        raise InsufficientCredits(extra, int(wallet.get("available_credits") or 0))
+                    _memory_wallets[account_id]["available_credits"] -= extra
+                self._consume_lots(account_id, final_amount)
+                _memory_wallets[account_id]["reserved_credits"] -= reserved
+                _memory_wallets[account_id]["available_credits"] += refund
+                _memory_wallets[account_id]["updated_at"] = now
+                _memory_reservations[job_id]["status"] = "committed"
+                _memory_reservations[job_id]["final_credits"] = final_amount
+                _memory_reservations[job_id]["updated_at"] = now
+                self._insert_ledger(entry)
+                if refund_entry:
+                    self._insert_ledger(refund_entry)
+                return entry
+
+            with self._client.start_session() as session:
+                with session.start_transaction():
+                    existing = self.ledger.find_one(
+                        {"idempotency_key": f"debit:{job_id}"},
+                        session=session,
+                    )
+                    if existing:
+                        return _without_id(existing) or {}
+
+                    if extra:
+                        wallet = self.wallets.find_one_and_update(
+                            {"billing_account_id": account_id, "available_credits": {"$gte": extra}},
+                            {"$inc": {"available_credits": -extra}, "$set": {"updated_at": now}},
+                            return_document=True,
+                            session=session,
+                        )
+                        if not wallet:
+                            current = self.get_wallet(account_id)
+                            raise InsufficientCredits(extra, int(current.get("available_credits") or 0))
+
+                    self._consume_lots(account_id, final_amount, session=session)
+                    self.wallets.update_one(
+                        {"billing_account_id": account_id},
+                        {
+                            "$inc": {"reserved_credits": -reserved, "available_credits": refund},
+                            "$set": {"updated_at": now},
+                        },
+                        session=session,
+                    )
+                    self.reservations.update_one(
+                        {"job_id": job_id, "billing_account_id": account_id},
+                        {
+                            "$set": {
+                                "status": "committed",
+                                "final_credits": final_amount,
+                                "updated_at": now,
+                            }
+                        },
+                        session=session,
+                    )
+                    self.ledger.insert_one(entry, session=session)
+                    if refund_entry:
+                        self.ledger.insert_one(refund_entry, session=session)
+        except Exception:
+            self._release_commit_claim(account_id, job_id)
+            raise
+
         return entry
 
     def _claim_reservation_for_commit(
@@ -704,11 +740,11 @@ class BillingStore:
         )
         return self.get_reservation(job_id)
 
-    def _consume_lots(self, account_id: str, amount: int) -> None:
+    def _consume_lots(self, account_id: str, amount: int, *, session: Any = None) -> None:
         remaining = amount
         now = utc_now()
         while remaining > 0:
-            lots = list(self.active_lots(account_id))
+            lots = list(self.active_lots(account_id, session=session))
             if not lots:
                 break
             progressed = False
@@ -730,6 +766,7 @@ class BillingStore:
                         "$inc": {"remaining_credits": -take},
                         "$set": {"updated_at": now},
                     },
+                    session=session,
                 )
                 if getattr(result, "modified_count", 0) == 1:
                     remaining -= take
@@ -741,7 +778,7 @@ class BillingStore:
                 f"Wallet had credits but credit lots were short by {remaining}"
             )
 
-    def active_lots(self, account_id: str) -> Iterable[dict[str, Any]]:
+    def active_lots(self, account_id: str, *, session: Any = None) -> Iterable[dict[str, Any]]:
         now = utc_now()
         if self._in_memory:
             lots = [
@@ -757,7 +794,8 @@ class BillingStore:
                 "billing_account_id": account_id,
                 "remaining_credits": {"$gt": 0},
                 "$or": [{"expires_at": None}, {"expires_at": {"$gt": now}}],
-            }
+            },
+            session=session,
         ).sort("expires_at", 1)
         return [_without_id(lot) or {} for lot in cursor]
 
@@ -766,6 +804,13 @@ class BillingStore:
             entry = _memory_ledger.get(idempotency_key)
             return dict(entry) if entry else None
         return _without_id(self.ledger.find_one({"idempotency_key": idempotency_key}))
+
+    def has_payment_event(self, event_id: str) -> bool:
+        if not event_id:
+            return False
+        if self._in_memory:
+            return event_id in _memory_payment_events
+        return self.payments.find_one({"razorpay_event_id": event_id}) is not None
 
     def list_ledger(self, account_id: str, limit: int = 100) -> list[dict[str, Any]]:
         if self._in_memory:

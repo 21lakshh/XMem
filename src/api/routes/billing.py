@@ -294,12 +294,7 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Webhook event id is required")
     event_name = str(payload.get("event") or "")
     service = get_default_billing_service()
-    first_seen = await asyncio.to_thread(
-        service.store.mark_payment_event,
-        event_id,
-        {"event": event_name, "payload": payload},
-    )
-    if not first_seen:
+    if await asyncio.to_thread(service.store.has_payment_event, event_id):
         return {"status": "ignored_duplicate"}
 
     payment = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
@@ -314,6 +309,11 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
 
     if not user_id or not package_id:
         logger.info("Ignoring Razorpay webhook without XMem user/package notes: %s", event_name)
+        await asyncio.to_thread(
+            service.store.mark_payment_event,
+            event_id,
+            {"event": event_name, "payload": payload},
+        )
         return {"status": "ignored"}
 
     if event_name in {"payment.captured", "order.paid", "subscription.charged"}:
@@ -332,6 +332,14 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
                 payment_id=payment_id or event_id,
                 order_id=order_id or event_id,
             )
+
+    first_seen = await asyncio.to_thread(
+        service.store.mark_payment_event,
+        event_id,
+        {"event": event_name, "payload": payload},
+    )
+    if not first_seen:
+        return {"status": "ignored_duplicate"}
 
     return {"status": "ok"}
 
