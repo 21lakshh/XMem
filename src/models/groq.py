@@ -20,7 +20,7 @@ def build_groq_model(
     except ImportError as exc:
         raise ImportError(
             "Groq support requires langchain-groq. "
-            "Install it with: pip install langchain-groq"
+            "Install it with: pip install -e \".[local]\""
         ) from exc
 
     api_key = settings.groq_api_key
