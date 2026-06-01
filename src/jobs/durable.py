@@ -275,7 +275,7 @@ class DurableJobStore:
     def mark_dead_letter(self, job_id: str, error: str) -> None:
         now = utc_now()
         self.jobs.update_one(
-            {"job_id": job_id},
+            {"job_id": job_id, "status": {"$nin": list(TERMINAL_STATUSES)}},
             {
                 "$set": {
                     "status": DEAD_LETTER,

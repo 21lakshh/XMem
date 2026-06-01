@@ -180,6 +180,21 @@ def test_mark_cancelled_does_not_overwrite_succeeded_job():
     assert "cancelled_at" not in job
 
 
+def test_mark_dead_letter_does_not_overwrite_cancelled_job():
+    store = _durable_store_with_doc({
+        "job_id": "job-1",
+        "status": CANCELLED,
+        "cancelled_at": utc_now(),
+    })
+
+    store.mark_dead_letter("job-1", "late failure")
+
+    job = store.get("job-1")
+    assert job["status"] == CANCELLED
+    assert "dead_lettered_at" not in job
+    assert "error" not in job
+
+
 def test_reserve_workflow_start_claims_queued_job_once():
     store = _durable_store_with_doc({
         "job_id": "job-1",
