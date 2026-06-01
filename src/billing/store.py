@@ -7,6 +7,11 @@ from typing import Any, Iterable, Optional
 
 from src.config import settings
 
+try:
+    from pymongo.errors import DuplicateKeyError
+except Exception:  # pragma: no cover - pymongo may be absent in memory-only dev/test.
+    DuplicateKeyError = None  # type: ignore[assignment]
+
 logger = logging.getLogger("xmem.billing.store")
 
 _memory_accounts: dict[str, dict[str, Any]] = {}
@@ -15,7 +20,9 @@ _memory_lots: dict[str, dict[str, Any]] = {}
 _memory_ledger: dict[str, dict[str, Any]] = {}
 _memory_reservations: dict[str, dict[str, Any]] = {}
 _memory_usage_events: list[dict[str, Any]] = []
-_memory_payments: dict[str, dict[str, Any]] = {}
+_memory_checkouts: dict[str, dict[str, Any]] = {}
+_memory_payment_events: dict[str, dict[str, Any]] = {}
+_memory_payments = _memory_checkouts
 
 
 class BillingStoreError(RuntimeError):
@@ -51,6 +58,10 @@ def _is_expired(doc: dict[str, Any], now: Optional[datetime] = None) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at <= now
+
+
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    return DuplicateKeyError is not None and isinstance(exc, DuplicateKeyError)
 
 
 class BillingStore:
@@ -247,7 +258,7 @@ class BillingStore:
             self.ledger.insert_one(entry)
             return None
         except Exception as exc:
-            if exc.__class__.__name__ != "DuplicateKeyError":
+            if not _is_duplicate_key_error(exc):
                 raise
             return _without_id(self.ledger.find_one({"idempotency_key": entry["idempotency_key"]}))
 
@@ -413,7 +424,7 @@ class BillingStore:
             try:
                 self.reservations.insert_one(reservation)
             except Exception as exc:
-                if exc.__class__.__name__ != "DuplicateKeyError":
+                if not _is_duplicate_key_error(exc):
                     raise
                 current = self.get_reservation(job_id)
                 if (
@@ -641,27 +652,44 @@ class BillingStore:
         job_id: str,
         metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
-        reservation = self.get_reservation(job_id)
-        if not reservation or reservation.get("status") != "active":
-            return reservation
         now = utc_now()
-        amount = int(reservation.get("reserved_credits") or 0)
         if self._in_memory:
+            reservation = _memory_reservations.get(job_id)
+            if not reservation or reservation.get("status") != "active":
+                return dict(reservation) if reservation else None
+            if reservation.get("billing_account_id") != account_id:
+                raise BillingStoreError(
+                    f"Reservation for job {job_id} belongs to a different billing account"
+                )
+            reservation["status"] = "released"
+            reservation["updated_at"] = now
+            amount = int(reservation.get("reserved_credits") or 0)
             _memory_wallets[account_id]["available_credits"] += amount
             _memory_wallets[account_id]["reserved_credits"] -= amount
             _memory_wallets[account_id]["updated_at"] = now
-            _memory_reservations[job_id]["status"] = "released"
-            _memory_reservations[job_id]["updated_at"] = now
         else:
+            from pymongo import ReturnDocument
+
+            reservation_doc = self.reservations.find_one_and_update(
+                {"job_id": job_id, "billing_account_id": account_id, "status": "active"},
+                {"$set": {"status": "released", "updated_at": now}},
+                return_document=ReturnDocument.BEFORE,
+            )
+            if not reservation_doc:
+                current = self.get_reservation(job_id)
+                if current and current.get("billing_account_id") != account_id:
+                    raise BillingStoreError(
+                        f"Reservation for job {job_id} belongs to a different billing account"
+                    )
+                return current
+            reservation = _without_id(reservation_doc) or {}
+            amount = int(reservation.get("reserved_credits") or 0)
             self.wallets.update_one(
                 {"billing_account_id": account_id},
                 {
                     "$inc": {"available_credits": amount, "reserved_credits": -amount},
                     "$set": {"updated_at": now},
                 },
-            )
-            self.reservations.update_one(
-                {"job_id": job_id}, {"$set": {"status": "released", "updated_at": now}}
             )
         self._insert_ledger(
             {
@@ -766,29 +794,29 @@ class BillingStore:
         now = utc_now()
         doc = {"id": checkout_id, **payload, "updated_at": now}
         if self._in_memory:
-            _memory_payments[checkout_id] = doc
+            _memory_checkouts[checkout_id] = doc
             return
         self.payments.update_one({"id": checkout_id}, {"$set": doc, "$setOnInsert": {"created_at": now}}, upsert=True)
 
     def get_checkout(self, checkout_id: str) -> Optional[dict[str, Any]]:
         if self._in_memory:
-            return dict(_memory_payments[checkout_id]) if checkout_id in _memory_payments else None
+            return dict(_memory_checkouts[checkout_id]) if checkout_id in _memory_checkouts else None
         return _without_id(self.payments.find_one({"id": checkout_id}))
 
     def mark_payment_event(self, event_id: str, payload: dict[str, Any]) -> bool:
         if not event_id:
-            event_id = uuid.uuid4().hex
+            raise ValueError("Razorpay webhook event id is required")
         now = utc_now()
         if self._in_memory:
-            if event_id in _memory_payments:
+            if event_id in _memory_payment_events:
                 return False
-            _memory_payments[event_id] = {"razorpay_event_id": event_id, **payload, "created_at": now}
+            _memory_payment_events[event_id] = {"razorpay_event_id": event_id, **payload, "created_at": now}
             return True
         try:
             self.payments.insert_one({"razorpay_event_id": event_id, **payload, "created_at": now})
             return True
         except Exception as exc:
-            if exc.__class__.__name__ == "DuplicateKeyError":
+            if _is_duplicate_key_error(exc):
                 return False
             raise
 

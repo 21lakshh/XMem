@@ -290,6 +290,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
         or payload.get("id")
         or ""
     )
+    if not event_id:
+        raise HTTPException(status_code=400, detail="Webhook event id is required")
     event_name = str(payload.get("event") or "")
     service = get_default_billing_service()
     first_seen = await asyncio.to_thread(

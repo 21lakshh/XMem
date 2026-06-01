@@ -21,7 +21,8 @@ def clear_memory_billing():
     billing_store._memory_ledger.clear()
     billing_store._memory_reservations.clear()
     billing_store._memory_usage_events.clear()
-    billing_store._memory_payments.clear()
+    billing_store._memory_checkouts.clear()
+    billing_store._memory_payment_events.clear()
 
 
 def service() -> BillingService:
@@ -78,6 +79,22 @@ def test_failed_job_releases_reserved_credits():
     summary = svc.get_billing_summary(user)
     assert summary.available_credits == 10_000
     assert summary.reserved_credits == 0
+
+
+def test_duplicate_release_does_not_double_refund():
+    svc = service()
+    user = {"id": "user_1"}
+    account = svc.ensure_billing_account(user)
+
+    svc.reserve_credits(account["id"], "job_1", 1000)
+    svc.release_job_reservation(account["id"], "job_1")
+    svc.release_job_reservation(account["id"], "job_1")
+
+    summary = svc.get_billing_summary(user)
+    releases = [entry for entry in svc.list_ledger(user) if entry["type"] == "release"]
+    assert summary.available_credits == 10_000
+    assert summary.reserved_credits == 0
+    assert len(releases) == 1
 
 
 def test_insufficient_credits_blocks_reservation():
@@ -150,3 +167,20 @@ def test_billing_config_changes_affect_estimates(monkeypatch):
     changed = svc.estimate_required_credits("memory_ingest", payload)
 
     assert changed.billable_credits == baseline.billable_credits * 2
+
+
+def test_missing_payment_event_id_is_rejected():
+    store = BillingStore()
+
+    with pytest.raises(ValueError):
+        store.mark_payment_event("", {"event": "payment.captured"})
+
+
+def test_in_memory_checkout_and_webhook_events_are_isolated():
+    store = BillingStore()
+
+    store.save_checkout("same_id", {"user_id": "user_1", "package_id": "topup_99"})
+
+    assert store.mark_payment_event("same_id", {"event": "payment.captured"})
+    assert not store.mark_payment_event("same_id", {"event": "payment.captured"})
+    assert store.get_checkout("same_id")["package_id"] == "topup_99"
