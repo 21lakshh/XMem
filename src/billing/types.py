@@ -6,6 +6,11 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class PlanPricePublic(BaseModel):
+    price_paise: int
+    currency: str = "INR"
+
+
 class PlanPublic(BaseModel):
     id: str
     name: str
@@ -15,6 +20,7 @@ class PlanPublic(BaseModel):
     trial_credits: int = 0
     trial_days: int = 0
     nominal_paise_per_credit: float = 0.0
+    regional_prices: dict[str, PlanPricePublic] = Field(default_factory=dict)
 
 
 class TopUpPackPublic(BaseModel):
@@ -66,6 +72,10 @@ class ReservationResult(BaseModel):
 
 class CheckoutRequest(BaseModel):
     package_id: str = Field(..., description="Plan ID or top-up pack ID")
+    billing_region: Optional[str] = Field(
+        default=None,
+        description="Billing region hint, e.g. IN for India or GLOBAL for non-India pricing",
+    )
 
 
 class CheckoutResponse(BaseModel):
@@ -85,6 +95,7 @@ class VerifyPaymentRequest(BaseModel):
     razorpay_signature: str
     razorpay_order_id: Optional[str] = None
     razorpay_subscription_id: Optional[str] = None
+    billing_region: Optional[str] = None
 
 
 class LedgerEntryPublic(BaseModel):

@@ -27,6 +27,26 @@ PLANS: dict[str, dict[str, Any]] = {
     },
 }
 
+BILLING_REGION_IN = "IN"
+BILLING_REGION_GLOBAL = "GLOBAL"
+BILLING_REGION_ALIASES = {
+    "IN": BILLING_REGION_IN,
+    "IND": BILLING_REGION_IN,
+    "INDIA": BILLING_REGION_IN,
+    "GLOBAL": BILLING_REGION_GLOBAL,
+    "US": BILLING_REGION_GLOBAL,
+    "USD": BILLING_REGION_GLOBAL,
+    "INTERNATIONAL": BILLING_REGION_GLOBAL,
+    "WORLD": BILLING_REGION_GLOBAL,
+}
+
+PLAN_REGIONAL_PRICES: dict[str, dict[str, dict[str, Any]]] = {
+    "pro": {
+        BILLING_REGION_IN: {"price_paise": 9_900, "currency": "INR"},
+        BILLING_REGION_GLOBAL: {"price_paise": 300, "currency": "USD"},
+    },
+}
+
 TOP_UP_PACKS: dict[str, dict[str, Any]] = {
     "topup_99": {"price_paise": 9_900, "credits": 5_000, "currency": "INR"},
     "topup_199": {"price_paise": 19_900, "credits": 12_000, "currency": "INR"},
@@ -73,6 +93,40 @@ def workflow_multiplier(job_type: str, payload: Mapping[str, Any]) -> float:
             return WORKFLOW_MULTIPLIERS["memory_ingest_standard"]
         return WORKFLOW_MULTIPLIERS["memory_ingest_low"]
     return WORKFLOW_MULTIPLIERS.get(job_type, 1.0)
+
+
+def normalize_billing_region(region: str | None) -> str:
+    if not region:
+        return BILLING_REGION_IN
+    return BILLING_REGION_ALIASES.get(region.strip().upper(), BILLING_REGION_GLOBAL)
+
+
+def plan_price(plan_id: str, region: str | None = None) -> dict[str, Any]:
+    plan = PLANS[plan_id]
+    normalized_region = normalize_billing_region(region)
+    regional_price = PLAN_REGIONAL_PRICES.get(plan_id, {}).get(normalized_region)
+    if not regional_price:
+        return {
+            "price_paise": int(plan.get("price_paise") or 0),
+            "currency": str(plan.get("currency") or "INR"),
+        }
+    return {
+        "price_paise": int(regional_price["price_paise"]),
+        "currency": str(regional_price.get("currency") or plan.get("currency") or "INR"),
+    }
+
+
+def plan_price_options(plan_id: str) -> dict[str, dict[str, Any]]:
+    options = PLAN_REGIONAL_PRICES.get(plan_id)
+    if not options:
+        return {}
+    return {
+        region: {
+            "price_paise": int(price["price_paise"]),
+            "currency": str(price.get("currency") or "INR"),
+        }
+        for region, price in options.items()
+    }
 
 
 def nominal_paise_per_credit(plan_id: str) -> float:

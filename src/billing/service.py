@@ -43,6 +43,7 @@ def public_plans() -> list[PlanPublic]:
             trial_credits=int(plan.get("trial_credits") or 0),
             trial_days=int(plan.get("trial_days") or 0),
             nominal_paise_per_credit=billing_config.nominal_paise_per_credit(plan_id),
+            regional_prices=billing_config.plan_price_options(plan_id),
         )
         for plan_id, plan in billing_config.PLANS.items()
     ]
