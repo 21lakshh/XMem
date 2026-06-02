@@ -82,6 +82,19 @@ def _pack_or_plan(package_id: str) -> tuple[str, dict[str, Any]]:
     raise HTTPException(status_code=400, detail="Unknown billing package")
 
 
+def _checkout_package(package_id: str, package: dict[str, Any], region: str) -> dict[str, Any]:
+    checkout_package = dict(package)
+    if package_id in billing_config.PLANS:
+        checkout_package.update(billing_config.plan_price(package_id, region))
+    return checkout_package
+
+
+def _pro_plan_id_for_region(region: str) -> str | None:
+    if region == billing_config.BILLING_REGION_GLOBAL:
+        return settings.razorpay_global_pro_plan_id
+    return settings.razorpay_pro_plan_id
+
+
 @router.get("/plans", response_model=list[PlanPublic])
 async def list_billing_plans() -> list[PlanPublic]:
     return public_plans()
@@ -110,6 +123,8 @@ async def create_razorpay_checkout(
 
     user_id = _user_id(current_user)
     package_type, package = _pack_or_plan(request.package_id)
+    billing_region = billing_config.normalize_billing_region(request.billing_region)
+    checkout_package = _checkout_package(request.package_id, package, billing_region)
     service = get_default_billing_service()
     account = await asyncio.to_thread(service.ensure_billing_account, current_user)
 
@@ -121,13 +136,15 @@ async def create_razorpay_checkout(
         "billing_account_id": account["id"],
         "package_id": request.package_id,
         "package_type": package_type,
+        "billing_region": billing_region,
     }
     receipt = _receipt(user_id, request.package_id)
 
     try:
-        if request.package_id == "pro" and settings.razorpay_pro_plan_id:
+        pro_plan_id = _pro_plan_id_for_region(billing_region)
+        if request.package_id == "pro" and pro_plan_id:
             subscription = await create_subscription(
-                plan_id=settings.razorpay_pro_plan_id,
+                plan_id=pro_plan_id,
                 notes=notes,
             )
             checkout_id = str(subscription["id"])
@@ -139,6 +156,7 @@ async def create_razorpay_checkout(
                     "user_id": user_id,
                     "billing_account_id": account["id"],
                     "package_id": request.package_id,
+                    "billing_region": billing_region,
                     "subscription_id": checkout_id,
                     "status": "created",
                 },
@@ -147,16 +165,16 @@ async def create_razorpay_checkout(
                 id=checkout_id,
                 subscription_id=checkout_id,
                 package_id=request.package_id,
-                amount=int(package["price_paise"]),
-                currency=str(package.get("currency") or "INR"),
+                amount=int(checkout_package["price_minor_unit"]),
+                currency=str(checkout_package.get("currency") or "INR"),
                 key_id=key_id,
                 receipt=receipt,
             )
 
-        amount = int(package["price_paise"])
+        amount = int(checkout_package.get("price_minor_unit") or checkout_package["price_paise"])
         order = await create_order(
             amount_paise=amount,
-            currency=str(package.get("currency") or "INR"),
+            currency=str(checkout_package.get("currency") or "INR"),
             receipt=receipt,
             notes=notes,
         )
@@ -172,9 +190,10 @@ async def create_razorpay_checkout(
             "user_id": user_id,
             "billing_account_id": account["id"],
             "package_id": request.package_id,
+            "billing_region": billing_region,
             "order_id": order_id,
             "amount": amount,
-            "currency": str(package.get("currency") or "INR"),
+            "currency": str(checkout_package.get("currency") or "INR"),
             "status": "created",
         },
     )
@@ -183,7 +202,7 @@ async def create_razorpay_checkout(
         order_id=order_id,
         package_id=request.package_id,
         amount=amount,
-        currency=str(package.get("currency") or "INR"),
+        currency=str(checkout_package.get("currency") or "INR"),
         key_id=key_id,
         receipt=receipt,
     )

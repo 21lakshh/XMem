@@ -499,7 +499,11 @@ class Settings(BaseSettings):
     )
     razorpay_pro_plan_id: Optional[str] = Field(
         default=None,
-        description="Razorpay subscription plan ID for the Pro plan",
+        description="Razorpay subscription plan ID for the India Pro plan",
+    )
+    razorpay_global_pro_plan_id: Optional[str] = Field(
+        default=None,
+        description="Razorpay subscription plan ID for the global USD Pro plan",
     )
 
     @field_validator("fallback_order")
