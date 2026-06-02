@@ -48,6 +48,7 @@ class UsageSnapshotPublic(BaseModel):
 class PaymentInvoicePublic(BaseModel):
     id: str
     date: datetime
+    amount_minor_units: int = 0
     amount_paise: int = 0
     currency: str = "INR"
     status: Literal["paid", "pending", "failed"] = "paid"

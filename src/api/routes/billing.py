@@ -95,6 +95,10 @@ def _pro_plan_id_for_region(region: str) -> str | None:
     return settings.razorpay_pro_plan_id
 
 
+def _minor_amount(value: Any) -> int | None:
+    return int(value) if value is not None else None
+
+
 @router.get("/plans", response_model=list[PlanPublic])
 async def list_billing_plans() -> list[PlanPublic]:
     return public_plans()
@@ -160,7 +164,9 @@ async def create_razorpay_checkout(
                     "subscription_id": checkout_id,
                     "amount": int(checkout_package["price_minor_unit"]),
                     "currency": str(checkout_package.get("currency") or "INR"),
-                    "credits": int(checkout_package.get("monthly_credits") or 0),
+                    "credits": int(
+                        billing_config.PLANS["pro"].get("monthly_credits") or 0
+                    ),
                     "status": "created",
                 },
             )
@@ -251,7 +257,7 @@ async def verify_razorpay_payment(
             user_id=user_id,
             payment_id=request.razorpay_payment_id,
             subscription_id=request.razorpay_subscription_id,
-            amount=int(checkout.get("amount") or 0) or None,
+            amount=_minor_amount(checkout.get("amount")),
             currency=checkout.get("currency"),
             billing_region=checkout.get("billing_region") or request.billing_region,
         )
@@ -279,7 +285,7 @@ async def verify_razorpay_payment(
                 user_id=user_id,
                 payment_id=request.razorpay_payment_id,
                 subscription_id=request.razorpay_order_id,
-                amount=int(checkout.get("amount") or 0) or None,
+                amount=_minor_amount(checkout.get("amount")),
                 currency=checkout.get("currency"),
                 billing_region=checkout.get("billing_region") or request.billing_region,
             )
@@ -290,7 +296,7 @@ async def verify_razorpay_payment(
                 pack_id=package_id,
                 payment_id=request.razorpay_payment_id,
                 order_id=request.razorpay_order_id,
-                amount=int(checkout.get("amount") or 0) or None,
+                amount=_minor_amount(checkout.get("amount")),
                 currency=checkout.get("currency"),
                 billing_region=checkout.get("billing_region") or request.billing_region,
             )
@@ -357,7 +363,7 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
                 user_id=user_id,
                 payment_id=payment_id,
                 subscription_id=subscription_id or order_id,
-                amount=int(payment.get("amount") or 0) or None,
+                amount=_minor_amount(payment.get("amount")),
                 currency=payment.get("currency"),
                 billing_region=notes.get("billing_region"),
             )
@@ -371,7 +377,7 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
                 pack_id=package_id,
                 payment_id=payment_id,
                 order_id=order_id,
-                amount=int(payment.get("amount") or 0) or None,
+                amount=_minor_amount(payment.get("amount")),
                 currency=payment.get("currency"),
                 billing_region=notes.get("billing_region"),
             )

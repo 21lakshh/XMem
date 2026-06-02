@@ -180,6 +180,7 @@ def test_pro_grant_is_idempotent_per_payment():
     assert len(pro_grants) == 1
     assert len(summary.invoices) == 1
     assert summary.invoices[0].id == "pay_1"
+    assert summary.invoices[0].amount_minor_units == 300
     assert summary.invoices[0].amount_paise == 300
     assert summary.invoices[0].currency == "USD"
     assert summary.invoices[0].credits == 5_000
@@ -203,10 +204,50 @@ def test_topup_grant_adds_dashboard_invoice():
     assert len(summary.invoices) == 1
     invoice = summary.invoices[0]
     assert invoice.id == "pay_topup_1"
+    assert invoice.amount_minor_units == 9_900
     assert invoice.amount_paise == 9_900
     assert invoice.currency == "INR"
     assert invoice.credits == 5_000
     assert invoice.status == "paid"
+    assert summary.current_month.credits_used == 0
+
+
+def test_zero_amount_invoice_preserves_minor_units():
+    svc = service()
+
+    svc.grant_topup(
+        user_id="user_1",
+        pack_id="topup_99",
+        payment_id="pay_zero",
+        order_id="order_zero",
+        amount=0,
+        currency="INR",
+        billing_region="IN",
+    )
+
+    summary = svc.get_billing_summary({"id": "user_1"})
+    assert summary.invoices[0].amount_minor_units == 0
+    assert summary.invoices[0].amount_paise == 0
+
+
+def test_zero_credit_paid_plan_reports_zero_credit_limit(monkeypatch):
+    svc = service()
+    account = svc.ensure_billing_account({"id": "user_1"})
+    monkeypatch.setitem(
+        billing_config.PLANS,
+        "zero_paid",
+        {
+            "name": "Zero Paid",
+            "price_paise": 0,
+            "currency": "INR",
+            "monthly_credits": 0,
+            "trial_credits": 1_000,
+        },
+    )
+    svc.store.update_account(account["id"], {"plan_id": "zero_paid", "status": "active"})
+
+    summary = svc.get_billing_summary({"id": "user_1"})
+    assert summary.current_month.credits_limit == 0
 
 
 def test_billing_config_changes_affect_estimates(monkeypatch):

@@ -140,6 +140,13 @@ class BillingStore:
             self.payments.create_index(
                 [("razorpay_payment_id", ASCENDING)], unique=True, sparse=True
             )
+            self.payments.create_index(
+                [
+                    ("billing_account_id", ASCENDING),
+                    ("type", ASCENDING),
+                    ("paid_at", ASCENDING),
+                ]
+            )
 
             self._connected = True
             self._in_memory = False

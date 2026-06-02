@@ -353,30 +353,58 @@ class BillingService:
         available_credits = int(wallet.get("available_credits") or 0)
         status = str(account.get("status") or "trialing")
         account_status = "trial" if status == "trialing" else status
-        invoices = [
-            PaymentInvoicePublic(
-                id=str(invoice.get("id") or invoice.get("razorpay_payment_id")),
-                date=invoice.get("paid_at") or invoice.get("created_at") or utc_now(),
-                amount_paise=int(
-                    invoice.get("amount_paise") or invoice.get("amount") or 0
-                ),
-                currency=str(invoice.get("currency") or plan.get("currency") or "INR"),
-                status=str(invoice.get("status") or "paid"),
-                credits=int(invoice.get("credits") or 0),
-                receipt_url=invoice.get("receipt_url"),
-                package_id=invoice.get("package_id"),
-                razorpay_payment_id=invoice.get("razorpay_payment_id"),
+        invoices = []
+        for invoice in self.store.list_payment_invoices(account["id"]):
+            raw_amount = (
+                invoice.get("amount_minor_units")
+                if invoice.get("amount_minor_units") is not None
+                else (
+                    invoice.get("amount_paise")
+                    if invoice.get("amount_paise") is not None
+                    else invoice.get("amount")
+                )
             )
-            for invoice in self.store.list_payment_invoices(account["id"])
-        ]
+            amount_minor_units = int(raw_amount or 0)
+            invoices.append(
+                PaymentInvoicePublic(
+                    id=str(invoice.get("id") or invoice.get("razorpay_payment_id")),
+                    date=invoice.get("paid_at")
+                    or invoice.get("created_at")
+                    or utc_now(),
+                    amount_minor_units=amount_minor_units,
+                    amount_paise=amount_minor_units,
+                    currency=str(
+                        invoice.get("currency") or plan.get("currency") or "INR"
+                    ),
+                    status=str(invoice.get("status") or "paid"),
+                    credits=int(invoice.get("credits") or 0),
+                    receipt_url=invoice.get("receipt_url"),
+                    package_id=invoice.get("package_id"),
+                    razorpay_payment_id=invoice.get("razorpay_payment_id"),
+                )
+            )
         last_payment_at = invoices[0].date if invoices else None
-        credits_limit = int(
-            plan.get("monthly_credits")
-            or plan.get("trial_credits")
-            or available_credits
-            or 0
+        if plan_id == "free" and plan.get("trial_credits") is not None:
+            credits_limit = int(plan.get("trial_credits") or 0)
+        elif plan.get("monthly_credits") is not None:
+            credits_limit = int(plan.get("monthly_credits") or 0)
+        else:
+            credits_limit = int(plan.get("trial_credits") or available_credits or 0)
+
+        period_start = account.get("current_period_start") or utc_now().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
         )
-        current_usage = max(credits_limit - available_credits, 0)
+        ledger_entries = self.store.list_ledger(account["id"], limit=500)
+        current_usage = sum(
+            abs(int(entry.get("amount") or 0))
+            for entry in ledger_entries
+            if entry.get("type") == "debit"
+            and (
+                not period_start
+                or not entry.get("created_at")
+                or entry["created_at"] >= period_start
+            )
+        )
         lots = [
             CreditLotPublic(
                 id=str(lot["id"]),
