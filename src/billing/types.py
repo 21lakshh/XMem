@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class PlanPricePublic(BaseModel):
-    price_paise: int
+    price_minor_unit: int
     currency: str = "INR"
 
 
@@ -74,7 +74,10 @@ class CheckoutRequest(BaseModel):
     package_id: str = Field(..., description="Plan ID or top-up pack ID")
     billing_region: Optional[str] = Field(
         default=None,
-        description="Billing region hint, e.g. IN for India or GLOBAL for non-India pricing",
+        description=(
+            "Client billing-region hint, e.g. IN for India or GLOBAL for non-India "
+            "pricing. Blank or missing hints use global pricing."
+        ),
     )
 
 

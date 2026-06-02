@@ -42,8 +42,8 @@ BILLING_REGION_ALIASES = {
 
 PLAN_REGIONAL_PRICES: dict[str, dict[str, dict[str, Any]]] = {
     "pro": {
-        BILLING_REGION_IN: {"price_paise": 9_900, "currency": "INR"},
-        BILLING_REGION_GLOBAL: {"price_paise": 300, "currency": "USD"},
+        BILLING_REGION_IN: {"price_minor_unit": 9_900, "currency": "INR"},
+        BILLING_REGION_GLOBAL: {"price_minor_unit": 300, "currency": "USD"},
     },
 }
 
@@ -96,8 +96,10 @@ def workflow_multiplier(job_type: str, payload: Mapping[str, Any]) -> float:
 
 
 def normalize_billing_region(region: str | None) -> str:
-    if not region:
-        return BILLING_REGION_IN
+    # Client-provided region is only a pricing hint; blank hints use global
+    # pricing to avoid undercharging when a client cannot derive location.
+    if not region or not region.strip():
+        return BILLING_REGION_GLOBAL
     return BILLING_REGION_ALIASES.get(region.strip().upper(), BILLING_REGION_GLOBAL)
 
 
@@ -107,11 +109,11 @@ def plan_price(plan_id: str, region: str | None = None) -> dict[str, Any]:
     regional_price = PLAN_REGIONAL_PRICES.get(plan_id, {}).get(normalized_region)
     if not regional_price:
         return {
-            "price_paise": int(plan.get("price_paise") or 0),
+            "price_minor_unit": int(plan.get("price_paise") or 0),
             "currency": str(plan.get("currency") or "INR"),
         }
     return {
-        "price_paise": int(regional_price["price_paise"]),
+        "price_minor_unit": int(regional_price["price_minor_unit"]),
         "currency": str(regional_price.get("currency") or plan.get("currency") or "INR"),
     }
 
@@ -122,7 +124,7 @@ def plan_price_options(plan_id: str) -> dict[str, dict[str, Any]]:
         return {}
     return {
         region: {
-            "price_paise": int(price["price_paise"]),
+            "price_minor_unit": int(price["price_minor_unit"]),
             "currency": str(price.get("currency") or "INR"),
         }
         for region, price in options.items()

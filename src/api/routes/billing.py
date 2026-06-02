@@ -165,13 +165,13 @@ async def create_razorpay_checkout(
                 id=checkout_id,
                 subscription_id=checkout_id,
                 package_id=request.package_id,
-                amount=int(checkout_package["price_paise"]),
+                amount=int(checkout_package["price_minor_unit"]),
                 currency=str(checkout_package.get("currency") or "INR"),
                 key_id=key_id,
                 receipt=receipt,
             )
 
-        amount = int(checkout_package["price_paise"])
+        amount = int(checkout_package.get("price_minor_unit") or checkout_package["price_paise"])
         order = await create_order(
             amount_paise=amount,
             currency=str(checkout_package.get("currency") or "INR"),
