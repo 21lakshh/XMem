@@ -97,6 +97,20 @@ def test_route_after_classify_fans_out_to_expected_nodes():
     ]
 
 
+def test_route_after_classify_summarizes_nontrivial_agent_response():
+    pipeline = _pipeline()
+    routes = pipeline._route_after_classify(
+        {
+            "user_query": "",
+            "agent_response": "Agent explained a detailed migration plan for XMem ingest chunking.",
+            "user_id": "user-1",
+            "classification_result": ClassificationResult(classifications=[]),
+        }
+    )
+
+    assert [route.node for route in routes] == ["extract_summary"]
+
+
 @pytest.mark.asyncio
 async def test_profile_and_temporal_nodes_use_deterministic_judge():
     pipeline = _pipeline()

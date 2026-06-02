@@ -727,6 +727,7 @@ class IngestPipeline:
         routes: List[Send] = []
         user_id = state.get("user_id", "default")
         user_query = state.get("user_query", "").strip()
+        agent_response = state.get("agent_response", "").strip()
         disabled_domains = set(state.get("disabled_domains") or [])
 
         # Collect queries per domain — merge duplicates so each agent runs once
@@ -749,7 +750,7 @@ class IngestPipeline:
 
         # Determine if we should run the summary extraction
         # Heuristic: Don't summarize tiny acknowledgments or greetings (unless they had classified facts)
-        words = user_query.split()
+        words = f"{user_query} {agent_response}".split()
         is_trivial = len(words) < 4 and not any(
             [profile_queries, temporal_queries, code_queries, image_queries]
         )
