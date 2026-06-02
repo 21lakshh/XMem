@@ -124,7 +124,7 @@ https://github.com/user-attachments/assets/f0fd393e-3820-404b-8d0e-e452e1dd52d0
   <tr>
     <td><strong>अस्थायी</strong></td>
     <td>समय-लंगर घटनाएं तारीख संकल्प के साथ</td>
-    <td><em>"मुझे कल Staff Engineer में पदोन्नति मिली"</em></td>
+    <td><em>"मुझे कल Staff Engineer के रूप में पदोन्नति मिली"</em></td>
     <td>Neo4j</td>
   </tr>
   <tr>
