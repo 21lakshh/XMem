@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
+from src.config.effort import EffortLevel, get_effort_config
 from src.pipelines.ingest import IngestPipeline
 from src.schemas.classification import ClassificationResult
 from src.schemas.events import EventData, EventResult
@@ -29,13 +28,23 @@ class StaticJudge:
 
     async def arun(self, state):
         self.states.append(("llm", state))
-        return JudgeResult(operations=[Operation(type=OperationType.ADD, content=state["new_items"][0])], confidence=0.8)
+        return JudgeResult(
+            operations=[
+                Operation(type=OperationType.ADD, content=state["new_items"][0])
+            ],
+            confidence=0.8,
+        )
 
     async def arun_deterministic(self, state):
         self.states.append(("deterministic", state))
         item = state["new_items"][0]
-        content = item if isinstance(item, str) else " | ".join(str(v) for v in item.values())
-        return JudgeResult(operations=[Operation(type=OperationType.ADD, content=content)], confidence=1.0)
+        content = (
+            item if isinstance(item, str) else " | ".join(str(v) for v in item.values())
+        )
+        return JudgeResult(
+            operations=[Operation(type=OperationType.ADD, content=content)],
+            confidence=1.0,
+        )
 
 
 class RecordingWeaver:
@@ -66,15 +75,19 @@ def _pipeline(org_id="default"):
 
 def test_route_after_classify_fans_out_to_expected_nodes():
     pipeline = _pipeline(org_id="acme")
-    routes = pipeline._route_after_classify({
-        "user_query": "I joined XMem and found a code issue tomorrow",
-        "user_id": "user-1",
-        "classification_result": ClassificationResult(classifications=[
-            {"source": "profile", "query": "I joined XMem"},
-            {"source": "event", "query": "tomorrow"},
-            {"source": "code", "query": "retry can fail"},
-        ]),
-    })
+    routes = pipeline._route_after_classify(
+        {
+            "user_query": "I joined XMem and found a code issue tomorrow",
+            "user_id": "user-1",
+            "classification_result": ClassificationResult(
+                classifications=[
+                    {"source": "profile", "query": "I joined XMem"},
+                    {"source": "event", "query": "tomorrow"},
+                    {"source": "code", "query": "retry can fail"},
+                ]
+            ),
+        }
+    )
 
     assert [route.node for route in routes] == [
         "extract_summary",
@@ -87,33 +100,142 @@ def test_route_after_classify_fans_out_to_expected_nodes():
 @pytest.mark.asyncio
 async def test_profile_and_temporal_nodes_use_deterministic_judge():
     pipeline = _pipeline()
-    pipeline.profiler = StaticAgent(ProfileResult(facts=[
-        ProfileFact(topic="work", sub_topic="company", memo="XMem")
-    ]))
-    pipeline.temporal = StaticAgent(EventResult(events=[
-        EventData(date="05-11", event_name="Launch", year=2026, desc="Ship tests")
-    ]))
+    pipeline.profiler = StaticAgent(
+        ProfileResult(
+            facts=[ProfileFact(topic="work", sub_topic="company", memo="XMem")]
+        )
+    )
+    pipeline.temporal = StaticAgent(
+        EventResult(
+            events=[
+                EventData(
+                    date="05-11", event_name="Launch", year=2026, desc="Ship tests"
+                )
+            ]
+        )
+    )
 
-    profile = await pipeline._node_extract_profile({"profile_queries": ["I work at XMem"], "user_id": "user-1"})
-    temporal = await pipeline._node_extract_temporal({"temporal_queries": ["launch today"], "user_id": "user-1"})
+    profile = await pipeline._node_extract_profile(
+        {"profile_queries": ["I work at XMem"], "user_id": "user-1"}
+    )
+    temporal = await pipeline._node_extract_temporal(
+        {"temporal_queries": ["launch today"], "user_id": "user-1"}
+    )
 
     assert profile["profile_weaver"].succeeded == 1
     assert temporal["temporal_weaver"].succeeded == 1
-    assert [kind for kind, _state in pipeline.judge.states] == ["deterministic", "deterministic"]
+    assert [kind for kind, _state in pipeline.judge.states] == [
+        "deterministic",
+        "deterministic",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_summary_node_splits_bullets_and_runs_judge_and_weaver():
     pipeline = _pipeline()
-    pipeline.summarizer = StaticAgent(SummaryResult(summary="- Likes deterministic tests\n- Uses XMem"))
+    pipeline.summarizer = StaticAgent(
+        SummaryResult(summary="- Likes deterministic tests\n- Uses XMem")
+    )
 
-    result = await pipeline._node_extract_summary({
-        "user_query": "remember this",
-        "agent_response": "ok",
-        "user_id": "user-1",
-    })
+    result = await pipeline._node_extract_summary(
+        {
+            "user_query": "remember this",
+            "agent_response": "ok",
+            "user_id": "user-1",
+        }
+    )
 
     assert result["summary_weaver"].succeeded == 1
     kind, state = pipeline.judge.states[0]
     assert kind == "llm"
     assert state["new_items"] == ["Likes deterministic tests", "Uses XMem"]
+
+
+@pytest.mark.asyncio
+async def test_low_effort_auto_escalates_large_combined_payload_to_high_mode():
+    pipeline = _pipeline()
+    calls = []
+
+    async def fake_high_effort(
+        user_query,
+        agent_response,
+        user_id,
+        session_datetime,
+        image_url,
+        cfg,
+        disabled_domains=None,
+    ):
+        calls.append(
+            {
+                "user_query": user_query,
+                "agent_response": agent_response,
+                "user_id": user_id,
+                "cfg": cfg,
+                "disabled_domains": disabled_domains,
+            }
+        )
+        return {"status": "completed", "errors": []}
+
+    async def fake_invoke_graph(*args, **kwargs):
+        raise AssertionError("large LOW ingest should use high-effort chunking")
+
+    pipeline._run_high_effort = fake_high_effort
+    pipeline._invoke_graph = fake_invoke_graph
+
+    result = await pipeline.run(
+        user_query="u" * 5_000,
+        agent_response="a" * 5_000,
+        user_id="user-1",
+        effort_level=EffortLevel.LOW,
+        disabled_domains=["code"],
+    )
+
+    assert result["status"] == "completed"
+    assert len(calls) == 1
+    assert calls[0]["cfg"].level == EffortLevel.HIGH
+    assert calls[0]["disabled_domains"] == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_high_effort_chunks_user_and_agent_response_positionally():
+    pipeline = _pipeline()
+    calls = []
+
+    async def fake_invoke_graph(
+        user_query,
+        agent_response,
+        user_id,
+        session_datetime,
+        image_url,
+        disabled_domains=None,
+    ):
+        calls.append(
+            {
+                "user_query": user_query,
+                "agent_response": agent_response,
+                "image_url": image_url,
+            }
+        )
+        return {"status": "completed", "errors": []}
+
+    pipeline._invoke_graph = fake_invoke_graph
+    cfg = get_effort_config(EffortLevel.HIGH)
+    user_query = "u" * 2_500
+    agent_response = "a" * 2_500
+
+    result = await pipeline._run_high_effort(
+        user_query=user_query,
+        agent_response=agent_response,
+        user_id="user-1",
+        session_datetime="",
+        image_url="image://once",
+        cfg=cfg,
+    )
+
+    assert result["status"] == "completed"
+    assert len(calls) > 1
+    assert calls[0]["image_url"] == "image://once"
+    assert all(call["image_url"] == "" for call in calls[1:])
+    assert all(len(call["user_query"]) < len(user_query) for call in calls)
+    assert all(len(call["agent_response"]) < len(agent_response) for call in calls)
+    assert calls[0]["agent_response"] != calls[1]["agent_response"]

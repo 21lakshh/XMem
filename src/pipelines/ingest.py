@@ -82,13 +82,19 @@ from src.schemas.code import (
 )
 from src.schemas.events import EventResult
 from src.schemas.image import ImageResult
-from src.schemas.judge import JudgeDomain, JudgeResult, OperationType
+from src.schemas.judge import JudgeDomain, JudgeResult
 from src.schemas.profile import ProfileResult
 from src.schemas.summary import SummaryResult
 from src.schemas.weaver import WeaverResult
 from src.storage.base import BaseVectorStore, SearchResult
 from src.storage.factory import get_vector_store
-from src.config.effort import EffortLevel, EffortConfig, get_effort_config, chunk_text, estimate_tokens
+from src.config.effort import (
+    EffortLevel,
+    EffortConfig,
+    get_effort_config,
+    chunk_text,
+    estimate_tokens,
+)
 
 logger = logging.getLogger("xmem.pipelines.ingest")
 
@@ -133,8 +139,12 @@ def get_embedding_client() -> genai.Client:
     global _embedding_client
     if _embedding_client is None:
         api_key_to_use = settings.gemini_api_key or None
-        _embedding_client = genai.Client(api_key=api_key_to_use) if api_key_to_use else genai.Client()
-        logger.info("Loaded Gemini embedding client for model: %s", settings.embedding_model)
+        _embedding_client = (
+            genai.Client(api_key=api_key_to_use) if api_key_to_use else genai.Client()
+        )
+        logger.info(
+            "Loaded Gemini embedding client for model: %s", settings.embedding_model
+        )
     return _embedding_client
 
 
@@ -153,7 +163,9 @@ def _get_bedrock_embedding_client():
             kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
 
         _bedrock_embedding_client = boto3.client("bedrock-runtime", **kwargs)
-        logger.info("Loaded Bedrock embedding client for model: %s", settings.embedding_model)
+        logger.info(
+            "Loaded Bedrock embedding client for model: %s", settings.embedding_model
+        )
     return _bedrock_embedding_client
 
 
@@ -171,7 +183,9 @@ def _get_openai_embedding_client():
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not set but EMBEDDING_PROVIDER=openai")
         _openai_embedding_client = OpenAI(api_key=api_key)
-        logger.info("Loaded OpenAI embedding client for model: %s", settings.embedding_model)
+        logger.info(
+            "Loaded OpenAI embedding client for model: %s", settings.embedding_model
+        )
     return _openai_embedding_client
 
 
@@ -183,14 +197,16 @@ def _get_fastembed_model():
         except ImportError as exc:
             raise ImportError(
                 "FastEmbed is not installed. Install local embedding dependencies "
-                "with: pip install -e \".[local]\""
+                'with: pip install -e ".[local]"'
             ) from exc
         _fastembed_model = TextEmbedding(model_name=settings.fastembed_model)
         logger.info("Loaded FastEmbed model: %s", settings.fastembed_model)
     return _fastembed_model
 
 
-def _ensure_embedding_dimension(values: tuple[float, ...], provider: str) -> tuple[float, ...]:
+def _ensure_embedding_dimension(
+    values: tuple[float, ...], provider: str
+) -> tuple[float, ...]:
     expected = int(settings.pinecone_dimension)
     if len(values) != expected:
         raise ValueError(
@@ -227,12 +243,15 @@ def embed_text(text: str) -> tuple[float, ...]:
 
 def _embed_text_gemini(text: str) -> tuple[float, ...]:
     import time as _time
+
     client = get_embedding_client()
     start = _time.perf_counter()
     result = client.models.embed_content(
         model=settings.embedding_model,
         contents=text,
-        config=types.EmbedContentConfig(output_dimensionality=settings.pinecone_dimension),
+        config=types.EmbedContentConfig(
+            output_dimensionality=settings.pinecone_dimension
+        ),
     )
     elapsed = _time.perf_counter() - start
     [embedding_obj] = result.embeddings
@@ -241,6 +260,7 @@ def _embed_text_gemini(text: str) -> tuple[float, ...]:
     input_tokens = getattr(result, "input_tokens", 0) or len(text.split())
     try:
         from src.config.analytics import analytics
+
         analytics.track_llm_call(
             provider="gemini",
             model=settings.embedding_model,
@@ -285,6 +305,7 @@ def _embed_text_openai(text: str) -> tuple[float, ...]:
     input_tokens = getattr(response.usage, "total_tokens", 0) or len(text.split())
     try:
         from src.config.analytics import analytics
+
         analytics.track_llm_call(
             provider="openai",
             model=model,
@@ -370,6 +391,7 @@ def _embed_text_fastembed(text: str) -> tuple[float, ...]:
 # LangGraph state (typed dict shared across all nodes)
 # ---------------------------------------------------------------------------
 
+
 class IngestState(TypedDict, total=False):
     # ── input ─────────────────────────────────────────────────────────
     user_query: str
@@ -379,10 +401,10 @@ class IngestState(TypedDict, total=False):
     session_datetime: str
 
     # ── routing (internal — set by _route_after_classify) ─────────────
-    profile_queries: List[str]      # batched profile sub-queries
-    temporal_queries: List[str]     # batched temporal sub-queries
-    image_queries: List[str]        # batched image sub-queries
-    code_queries: List[str]         # batched code sub-queries
+    profile_queries: List[str]  # batched profile sub-queries
+    temporal_queries: List[str]  # batched temporal sub-queries
+    image_queries: List[str]  # batched image sub-queries
+    code_queries: List[str]  # batched code sub-queries
 
     # ── classification ────────────────────────────────────────────────
     classification_result: ClassificationResult
@@ -422,6 +444,7 @@ class IngestState(TypedDict, total=False):
 # Pipeline class
 # ---------------------------------------------------------------------------
 
+
 class IngestPipeline:
     """End-to-end ingest pipeline wired with real Pinecone + Neo4j."""
 
@@ -445,14 +468,19 @@ class IngestPipeline:
             self.vector_store = get_vector_store(
                 namespace=settings.pinecone_namespace,
             )
-        logger.info("Vector store initialised (provider=%s).", settings.vector_store_provider)
+        logger.info(
+            "Vector store initialised (provider=%s).", settings.vector_store_provider
+        )
 
         # ── Code annotations Pinecone store (annotations namespace) ──
         self.code_vector_store = get_vector_store(
             namespace=annotations_namespace(org_id),
             create_if_not_exists=False,
         )
-        logger.info("Code annotations vector store initialised (ns=%s).", annotations_namespace(org_id))
+        logger.info(
+            "Code annotations vector store initialised (ns=%s).",
+            annotations_namespace(org_id),
+        )
 
         # ── Neo4j (graph store — temporal) ────────────────────────────
         if neo4j_client:
@@ -537,11 +565,15 @@ class IngestPipeline:
     # ------------------------------------------------------------------
 
     async def _graph_event_search_wrapper(
-        self, event_name: str, user_id: str, top_k: int = 1,
+        self,
+        event_name: str,
+        user_id: str,
+        top_k: int = 1,
     ) -> List[SearchResult]:
         """Bridge Neo4j search results → SearchResult for the Judge."""
         loop = asyncio.get_running_loop()
         from functools import partial
+
         raw = await loop.run_in_executor(
             None,
             partial(
@@ -549,7 +581,7 @@ class IngestPipeline:
                 event_name=event_name,
                 user_id=user_id,
                 top_k=top_k,
-            )
+            ),
         )
         results: List[SearchResult] = []
         for r in raw:
@@ -567,10 +599,14 @@ class IngestPipeline:
         return results
 
     async def _graph_create_event(
-        self, user_id: str, date_str: str, event_data: Dict[str, Any],
+        self,
+        user_id: str,
+        date_str: str,
+        event_data: Dict[str, Any],
     ) -> None:
         loop = asyncio.get_running_loop()
         from functools import partial
+
         await loop.run_in_executor(
             None,
             partial(
@@ -578,14 +614,18 @@ class IngestPipeline:
                 user_id=user_id,
                 date_str=date_str,
                 event_data=event_data,
-            )
+            ),
         )
 
     async def _graph_update_event(
-        self, user_id: str, date_str: str, event_data: Dict[str, Any],
+        self,
+        user_id: str,
+        date_str: str,
+        event_data: Dict[str, Any],
     ) -> None:
         loop = asyncio.get_running_loop()
         from functools import partial
+
         await loop.run_in_executor(
             None,
             partial(
@@ -593,19 +633,23 @@ class IngestPipeline:
                 user_id=user_id,
                 date_str=date_str,
                 event_data=event_data,
-            )
+            ),
         )
 
     async def _graph_delete_event(
-        self, user_id: str, embedding_id: str = "", **kwargs,
+        self,
+        user_id: str,
+        embedding_id: str = "",
+        **kwargs,
     ) -> None:
         # embedding_id for temporal is "date_str_event_name"
         parts = embedding_id.split("_", 1)
         date_str = parts[0] if parts else ""
         event_name = parts[1] if len(parts) > 1 else None
-        
+
         loop = asyncio.get_running_loop()
         from functools import partial
+
         await loop.run_in_executor(
             None,
             partial(
@@ -613,7 +657,7 @@ class IngestPipeline:
                 user_id=user_id,
                 date_str=date_str,
                 event_name=event_name,
-            )
+            ),
         )
 
     async def _graph_create_annotation(
@@ -629,6 +673,7 @@ class IngestPipeline:
         """Bridge for creating code annotations in the code graph."""
         loop = asyncio.get_running_loop()
         from functools import partial
+
         return await loop.run_in_executor(
             None,
             partial(
@@ -641,7 +686,7 @@ class IngestPipeline:
                 repo=repo,
                 target_file=target_file,
                 target_symbol=target_symbol,
-            )
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -670,9 +715,11 @@ class IngestPipeline:
         if state.get("image_url"):
             user_query += " [User has attached an image]"
 
-        result = await self.classifier.arun({
-            "user_query": user_query,
-        })
+        result = await self.classifier.arun(
+            {
+                "user_query": user_query,
+            }
+        )
         return {"classification_result": result}
 
     def _route_after_classify(self, state: IngestState) -> List[Send]:
@@ -703,29 +750,46 @@ class IngestPipeline:
         # Determine if we should run the summary extraction
         # Heuristic: Don't summarize tiny acknowledgments or greetings (unless they had classified facts)
         words = user_query.split()
-        is_trivial = len(words) < 4 and not any([profile_queries, temporal_queries, code_queries, image_queries])
+        is_trivial = len(words) < 4 and not any(
+            [profile_queries, temporal_queries, code_queries, image_queries]
+        )
 
         if not is_trivial:
-            routes.append(Send("extract_summary", {
-                **state,
-                "user_id": user_id,
-            }))
+            routes.append(
+                Send(
+                    "extract_summary",
+                    {
+                        **state,
+                        "user_id": user_id,
+                    },
+                )
+            )
         else:
             logger.info("Skipping summary extraction for trivial query.")
 
         if profile_queries:
-            routes.append(Send("extract_profile", {
-                **state,
-                "profile_queries": profile_queries,
-                "user_id": user_id,
-            }))
+            routes.append(
+                Send(
+                    "extract_profile",
+                    {
+                        **state,
+                        "profile_queries": profile_queries,
+                        "user_id": user_id,
+                    },
+                )
+            )
 
         if temporal_queries:
-            routes.append(Send("extract_temporal", {
-                **state,
-                "temporal_queries": temporal_queries,
-                "user_id": user_id,
-            }))
+            routes.append(
+                Send(
+                    "extract_temporal",
+                    {
+                        **state,
+                        "temporal_queries": temporal_queries,
+                        "user_id": user_id,
+                    },
+                )
+            )
 
         if code_queries and not {"code", "snippet"}.issubset(disabled_domains):
             # Enterprise users → team annotation extraction (Code Agent)
@@ -734,17 +798,27 @@ class IngestPipeline:
             is_enterprise = self.org_id != "default"
 
             if is_enterprise and "code" not in disabled_domains:
-                routes.append(Send("extract_code", {
-                    **state,
-                    "code_queries": code_queries,
-                    "user_id": user_id,
-                }))
+                routes.append(
+                    Send(
+                        "extract_code",
+                        {
+                            **state,
+                            "code_queries": code_queries,
+                            "user_id": user_id,
+                        },
+                    )
+                )
             elif not is_enterprise and "snippet" not in disabled_domains:
-                routes.append(Send("extract_snippet", {
-                    **state,
-                    "code_queries": code_queries,
-                    "user_id": user_id,
-                }))
+                routes.append(
+                    Send(
+                        "extract_snippet",
+                        {
+                            **state,
+                            "code_queries": code_queries,
+                            "user_id": user_id,
+                        },
+                    )
+                )
 
         # Image route
         if state.get("image_url"):
@@ -752,11 +826,16 @@ class IngestPipeline:
                 image_queries.append("Analyze this image for memory-relevant details.")
 
             combined_query = " ".join(image_queries)
-            routes.append(Send("extract_image", {
-                **state,
-                "classifier_output": combined_query,
-                "user_id": user_id,
-            }))
+            routes.append(
+                Send(
+                    "extract_image",
+                    {
+                        **state,
+                        "classifier_output": combined_query,
+                        "user_id": user_id,
+                    },
+                )
+            )
 
         return routes
 
@@ -777,11 +856,13 @@ class IngestPipeline:
         # Profile facts are already structured; exact metadata lookup avoids
         # an extra judge LLM call on the hot path.
         items = [f.model_dump() for f in result.facts]
-        judge_result = await self.judge.arun_deterministic({
-            "domain": "profile",
-            "new_items": items,
-            "user_id": user_id,
-        })
+        judge_result = await self.judge.arun_deterministic(
+            {
+                "domain": "profile",
+                "new_items": items,
+                "user_id": user_id,
+            }
+        )
 
         # Weave
         weaver_result = await self.weaver.execute(
@@ -803,30 +884,36 @@ class IngestPipeline:
 
         # Merge into a single query
         combined_query = " ".join(queries)
-        result = await self.temporal.arun({
-            "classifier_output": combined_query,
-            "session_datetime": session_dt,
-        })
+        result = await self.temporal.arun(
+            {
+                "classifier_output": combined_query,
+                "session_datetime": session_dt,
+            }
+        )
 
         if result.is_empty:
             return {"status": "no_temporal_event"}
 
         all_items: List[Dict[str, str]] = []
         for event in result.events:
-            all_items.append({
-                "date": event.date,
-                "event_name": event.event_name or "",
-                "desc": event.desc or "",
-                "year": event.year or "",
-                "time": event.time or "",
-                "date_expression": event.date_expression or "",
-            })
+            all_items.append(
+                {
+                    "date": event.date,
+                    "event_name": event.event_name or "",
+                    "desc": event.desc or "",
+                    "year": event.year or "",
+                    "time": event.time or "",
+                    "date_expression": event.date_expression or "",
+                }
+            )
 
-        judge_result = await self.judge.arun_deterministic({
-            "domain": "temporal",
-            "new_items": all_items,
-            "user_id": user_id,
-        })
+        judge_result = await self.judge.arun_deterministic(
+            {
+                "domain": "temporal",
+                "new_items": all_items,
+                "user_id": user_id,
+            }
+        )
 
         weaver_result = await self.weaver.execute(
             judge_result=judge_result,
@@ -852,7 +939,7 @@ class IngestPipeline:
         # Convert observations to list of dicts for Judge
         # items = [obs.model_dump() for obs in result.observations]
 
-        #converted observation of images to summary and stored as summary
+        # converted observation of images to summary and stored as summary
         items = []
         if result.description:
             items.append(f"[Image] {result.description}")
@@ -863,11 +950,13 @@ class IngestPipeline:
         if not items:
             return {"status": "no_image_observations"}
 
-        judge_result = await self.judge.arun({
-            "domain": JudgeDomain.SUMMARY,
-            "new_items": items,
-            "user_id": user_id,
-        })
+        judge_result = await self.judge.arun(
+            {
+                "domain": JudgeDomain.SUMMARY,
+                "new_items": items,
+                "user_id": user_id,
+            }
+        )
 
         weaver_result = await self.weaver.execute(
             judge_result=judge_result,
@@ -905,11 +994,13 @@ class IngestPipeline:
             ]
             all_items.append(" | ".join(parts))
 
-        judge_result = await self.judge.arun({
-            "domain": JudgeDomain.CODE,
-            "new_items": all_items,
-            "user_id": user_id,
-        })
+        judge_result = await self.judge.arun(
+            {
+                "domain": JudgeDomain.CODE,
+                "new_items": all_items,
+                "user_id": user_id,
+            }
+        )
 
         weaver_result = await self.weaver.execute(
             judge_result=judge_result,
@@ -945,11 +1036,13 @@ class IngestPipeline:
             ]
             all_items.append(" | ".join(parts))
 
-        judge_result = await self.judge.arun({
-            "domain": JudgeDomain.SNIPPET,
-            "new_items": all_items,
-            "user_id": user_id,
-        })
+        judge_result = await self.judge.arun(
+            {
+                "domain": JudgeDomain.SNIPPET,
+                "new_items": all_items,
+                "user_id": user_id,
+            }
+        )
 
         # Bind the user-scoped snippet store before executing
         self.weaver.snippet_vector_store = self._get_snippet_store(user_id)
@@ -966,10 +1059,12 @@ class IngestPipeline:
         }
 
     async def _node_extract_summary(self, state: IngestState) -> Dict[str, Any]:
-        result = await self.summarizer.arun({
-            "user_query": state.get("user_query", ""),
-            "agent_response": state.get("agent_response", ""),
-        })
+        result = await self.summarizer.arun(
+            {
+                "user_query": state.get("user_query", ""),
+                "agent_response": state.get("agent_response", ""),
+            }
+        )
         if result.is_empty:
             return {"status": "no_summary"}
 
@@ -982,11 +1077,13 @@ class IngestPipeline:
         if not items:
             return {"status": "no_summary_items"}
 
-        judge_result = await self.judge.arun({
-            "domain": "summary",
-            "new_items": items,
-            "user_id": state.get("user_id", "default"),
-        })
+        judge_result = await self.judge.arun(
+            {
+                "domain": "summary",
+                "new_items": items,
+                "user_id": state.get("user_id", "default"),
+            }
+        )
 
         weaver_result = await self.weaver.execute(
             judge_result=judge_result,
@@ -1020,8 +1117,14 @@ class IngestPipeline:
         workflow.add_conditional_edges(
             "classify",
             self._route_after_classify,
-            ["extract_profile", "extract_temporal", "extract_summary",
-             "extract_image", "extract_code", "extract_snippet"],
+            [
+                "extract_profile",
+                "extract_temporal",
+                "extract_summary",
+                "extract_image",
+                "extract_code",
+                "extract_snippet",
+            ],
         )
 
         # All extraction lanes → END
@@ -1061,12 +1164,15 @@ class IngestPipeline:
                               enterprise chat to keep project annotations out
                               of personal memory ingest.
 
-                              * **LOW**  — single pipeline call, fast.
-                              * **HIGH** — splits ``user_query`` into
-                                overlapping ≈200-token chunks, runs the full
-                                pipeline on every chunk **in parallel**, then
-                                merges the results.  Ensures nothing is missed
-                                in long inputs at the cost of more LLM calls.
+                              * **LOW**  — single pipeline call for ordinary
+                                inputs. Large LOW inputs auto-escalate to the
+                                HIGH chunking path.
+                              * **HIGH** — splits ``user_query`` and
+                                ``agent_response`` into paired overlapping
+                                chunks, runs the full pipeline on every pair,
+                                then merges the results. Ensures nothing is
+                                missed in long inputs at the cost of more LLM
+                                calls.
 
         Returns:
             Final LangGraph state dict with all intermediate results.
@@ -1075,7 +1181,9 @@ class IngestPipeline:
         effort_cfg: EffortConfig = get_effort_config(effort_level)
 
         logger.info("=" * 60)
-        logger.info("INGEST PIPELINE START  [effort=%s]", effort_cfg.level.value.upper())
+        logger.info(
+            "INGEST PIPELINE START  [effort=%s]", effort_cfg.level.value.upper()
+        )
         logger.info("  user_query: %s", user_query[:80])
         logger.info("  user_id:    %s", user_id)
         if image_url:
@@ -1085,10 +1193,25 @@ class IngestPipeline:
             )
         logger.info("=" * 60)
 
-        # ── HIGH effort: chunk + parallel dispatch ────────────────────
+        combined_tokens = estimate_tokens(f"{user_query}\n{agent_response}")
+        should_auto_high = (
+            effort_cfg.level == EffortLevel.LOW
+            and combined_tokens > effort_cfg.auto_high_threshold_tokens
+        )
+
+        if should_auto_high:
+            logger.info(
+                "Auto-escalating LOW ingest to HIGH chunking: %d tokens exceeds "
+                "auto threshold %d.",
+                combined_tokens,
+                effort_cfg.auto_high_threshold_tokens,
+            )
+            effort_cfg = get_effort_config(EffortLevel.HIGH)
+
+        # ── HIGH effort: paired chunk dispatch ────────────────────────
         if (
             effort_cfg.level == EffortLevel.HIGH
-            and estimate_tokens(user_query) > effort_cfg.chunk_threshold_tokens
+            and combined_tokens > effort_cfg.chunk_threshold_tokens
         ):
             result = await self._run_high_effort(
                 user_query=user_query,
@@ -1153,23 +1276,20 @@ class IngestPipeline:
         cfg: EffortConfig,
         disabled_domains: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """HIGH-effort path: chunk user_query → sequential pipeline calls → merge.
+        """HIGH-effort path: chunk user/assistant text → pipeline calls → merge.
 
-        Each chunk gets the full pipeline run independently and sequentially.
-        The ``agent_response`` is passed to every chunk so summary extraction
-        always has the full assistant context.  Image is only forwarded to the
-        first chunk to avoid duplicate image processing.
+        The user and assistant sides are split independently, then paired by
+        position. A short side is reused for every pair so a long question can
+        still see a short answer, while a long answer is not duplicated into
+        every user chunk. Image is only forwarded to the first pair to avoid
+        duplicate image processing.
         """
-        chunks = chunk_text(
-            user_query,
-            chunk_size_tokens=cfg.chunk_size_tokens,
-            overlap_tokens=cfg.overlap_tokens,
-        )
+        chunk_pairs = self._chunk_conversation_pair(user_query, agent_response, cfg)
 
         logger.info(
             "HIGH-effort ingest: %d chunk(s)  "
             "(chunk_size=%d tok, overlap=%d tok, threshold=%d tok)",
-            len(chunks),
+            len(chunk_pairs),
             cfg.chunk_size_tokens,
             cfg.overlap_tokens,
             cfg.chunk_threshold_tokens,
@@ -1178,11 +1298,11 @@ class IngestPipeline:
         # Process every chunk through the pipeline sequentially to avoid duplicates.
         # Image is only sent with chunk[0] to avoid duplicate processing.
         chunk_results: List[Dict[str, Any]] = []
-        for idx, chunk in enumerate(chunks):
-            logger.info("Processing chunk %d/%d...", idx + 1, len(chunks))
+        for idx, (user_chunk, response_chunk) in enumerate(chunk_pairs):
+            logger.info("Processing chunk %d/%d...", idx + 1, len(chunk_pairs))
             res = await self._invoke_graph(
-                user_query=chunk,
-                agent_response=agent_response,
+                user_query=user_chunk,
+                agent_response=response_chunk,
                 user_id=user_id,
                 session_datetime=session_datetime,
                 image_url=image_url if idx == 0 else "",
@@ -1218,6 +1338,41 @@ class IngestPipeline:
             len(all_errors),
         )
         return merged
+
+    def _chunk_conversation_pair(
+        self,
+        user_query: str,
+        agent_response: str,
+        cfg: EffortConfig,
+    ) -> List[tuple[str, str]]:
+        """Split user and assistant text independently, then pair by position."""
+
+        def _chunks(text: str) -> List[str]:
+            if not text.strip():
+                return []
+            if estimate_tokens(text) <= cfg.chunk_threshold_tokens:
+                return [text.strip()]
+            return chunk_text(
+                text,
+                chunk_size_tokens=cfg.chunk_size_tokens,
+                overlap_tokens=cfg.overlap_tokens,
+            )
+
+        user_chunks = _chunks(user_query)
+        response_chunks = _chunks(agent_response)
+        pair_count = max(len(user_chunks), len(response_chunks), 1)
+
+        def _select(chunks: List[str], idx: int) -> str:
+            if not chunks:
+                return ""
+            if len(chunks) == 1:
+                return chunks[0]
+            return chunks[idx] if idx < len(chunks) else ""
+
+        return [
+            (_select(user_chunks, idx), _select(response_chunks, idx))
+            for idx in range(pair_count)
+        ]
 
     def run_sync(
         self,
@@ -1265,7 +1420,11 @@ class IngestPipeline:
             if wr:
                 logger.info(
                     "  %s: %d ops (%d ok, %d skip, %d fail)",
-                    domain, wr.total, wr.succeeded, wr.skipped, wr.failed,
+                    domain,
+                    wr.total,
+                    wr.succeeded,
+                    wr.skipped,
+                    wr.failed,
                 )
             else:
                 logger.info("  %s: (not executed)", domain)

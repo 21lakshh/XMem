@@ -3,11 +3,11 @@ Effort-level configuration for the XMem ingest pipeline.
 
 Two modes
 ---------
-LOW   — fast, single pipeline call, no chunking.
-HIGH  — splits the user_query into overlapping chunks (≈200 tokens each,
-        with a small context overlap from the previous chunk) and runs the
-        full ingest pipeline on each chunk **in parallel**, ensuring that
-        nothing is missed even in long inputs.
+LOW   — fast, single pipeline call for ordinary inputs. Very large LOW inputs
+        are auto-escalated to the HIGH chunking path.
+HIGH  — splits the user_query and agent_response into paired, overlapping
+        chunks (≈200 tokens each) and runs the full ingest pipeline on each
+        pair sequentially, ensuring that nothing is missed even in long inputs.
 
         Token estimation: 4 characters ≈ 1 token (cheap, no tokeniser needed).
         Chunk boundary: snapped to the last sentence-ending full stop within
@@ -29,13 +29,13 @@ from enum import Enum
 from functools import lru_cache
 from typing import List
 
-
 # ---------------------------------------------------------------------------
 # Enums & config dataclass
 # ---------------------------------------------------------------------------
 
+
 class EffortLevel(str, Enum):
-    LOW  = "low"
+    LOW = "low"
     HIGH = "high"
 
 
@@ -57,6 +57,9 @@ class EffortConfig:
     # Number of tokens carried over from the tail of the previous chunk as
     # context for the next chunk.
     overlap_tokens: int
+    # LOW-mode inputs above this combined user/assistant token count are routed
+    # through HIGH mode automatically.
+    auto_high_threshold_tokens: int
 
     # ── Summarizer (kept for backward compat with SummarizerAgent) ────
     summary_chunk_threshold: int
@@ -76,6 +79,7 @@ _CONFIGS: dict[EffortLevel, EffortConfig] = {
         chunk_threshold_tokens=999_999,
         chunk_size_tokens=999_999,
         overlap_tokens=0,
+        auto_high_threshold_tokens=2_000,
         # Summarizer legacy knobs
         summary_chunk_threshold=999_999,
         summary_chunk_size=999_999,
@@ -83,9 +87,10 @@ _CONFIGS: dict[EffortLevel, EffortConfig] = {
     ),
     EffortLevel.HIGH: EffortConfig(
         level=EffortLevel.HIGH,
-        chunk_threshold_tokens=200,   # chunk if input exceeds this many tokens
-        chunk_size_tokens=200,        # target size of each chunk in tokens
-        overlap_tokens=15,            # tokens of tail-context carried forward
+        chunk_threshold_tokens=200,  # chunk if input exceeds this many tokens
+        chunk_size_tokens=200,  # target size of each chunk in tokens
+        overlap_tokens=15,  # tokens of tail-context carried forward
+        auto_high_threshold_tokens=2_000,
         # Summarizer legacy knobs
         summary_chunk_threshold=200,
         summary_chunk_size=100,
@@ -106,6 +111,7 @@ def get_effort_config(level: EffortLevel | str) -> EffortConfig:
 # Token estimation (4 chars ≈ 1 token — no tokeniser needed)
 # ---------------------------------------------------------------------------
 
+
 def estimate_tokens(text: str) -> int:
     """Cheap character-count proxy: 4 characters ≈ 1 token."""
     return max(1, len(text) // 4)
@@ -114,6 +120,7 @@ def estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 # Chunking helper
 # ---------------------------------------------------------------------------
+
 
 def chunk_text(
     text: str,
@@ -149,15 +156,15 @@ def chunk_text(
         Non-empty list of chunk strings (may be a single element if the input
         is short or no split point was found).
     """
-    chars_per_chunk = chunk_size_tokens * 4           # token → char budget
-    overlap_chars   = overlap_tokens   * 4            # overlap in chars
+    chars_per_chunk = chunk_size_tokens * 4  # token → char budget
+    overlap_chars = overlap_tokens * 4  # overlap in chars
 
     if len(text) <= chars_per_chunk:
         return [text.strip()] if text.strip() else []
 
     chunks: List[str] = []
     start = 0
-    prev_tail = ""   # overlap text from the previous chunk
+    prev_tail = ""  # overlap text from the previous chunk
 
     while start < len(text):
         end = min(start + chars_per_chunk, len(text))
@@ -171,7 +178,7 @@ def chunk_text(
         if last_period != -1:
             # Include the period itself; cursor moves past it.
             segment = window[: last_period + 1]
-            advance = last_period + 1           # chars consumed
+            advance = last_period + 1  # chars consumed
         else:
             # No sentence boundary — fall back to the full window.
             segment = window
@@ -193,7 +200,7 @@ def chunk_text(
         # Carry forward the tail of the *raw* (non-overlapped) segment as
         # overlap for the next chunk.
         tail_chars = min(overlap_chars, len(segment))
-        prev_tail  = segment[-tail_chars:] if tail_chars > 0 else ""
+        prev_tail = segment[-tail_chars:] if tail_chars > 0 else ""
 
         start += advance
 
