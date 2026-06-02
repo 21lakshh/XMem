@@ -84,7 +84,7 @@ https://github.com/user-attachments/assets/97793cf9-d247-4d02-9c31-3cc9bbbf89aa
 
 ### एजेंट प्लगइन
 
-नई [plugin/](plugin/) फ़ोल्डर XMem को डेवलपर एजेंटों और कोडिंग सहायकों में सीधे लाती है। इसमें [Claude Code](plugin/xmem-claude/), [Codex](plugin/xmem-codex/), [Cursor](plugin/xmem-cursor/), [Hermes](plugin/xmem-hermes/), [OpenClaw](plugin/xmem-openclaw/), और [OpenCode](plugin/xmem-opencode/) के लिए प्रथम-पक्षीय एकीकरण शामिल हैं, ताकि एजेंट मौजूदा मेमोरी खोज सकें, टिकाऊ परियोजना ज्ञान सहेज सकें, और सत्रों के बीच संदर्भ ले जा सकें जबकि API कुंजियों को पर्यावरण चर या क्लाइंट-विशिष्ट गुप्त स्टोर में रखते हैं।
+इसमें [Claude Code](plugin/xmem-claude/), [Codex](plugin/xmem-codex/), [Cursor](plugin/xmem-cursor/), [Hermes](plugin/xmem-hermes/), [OpenClaw](plugin/xmem-openclaw/) और [OpenCode](plugin/xmem-opencode/) के लिए प्रथम-पक्षीय एकीकरण शामिल हैं, ताकि एजेंट मौजूदा मेमोरी खोज सकें, टिकाऊ परियोजना ज्ञान सहेज सकें, और सत्रों के बीच संदर्भ ले जा सकें जबकि API कुंजियों को पर्यावरण चर या क्लाइंट-विशिष्ट गुप्त स्टोर में रखते हैं।
 
 ### संदर्भ
 
