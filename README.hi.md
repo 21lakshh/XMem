@@ -148,7 +148,7 @@ https://github.com/user-attachments/assets/f0fd393e-3820-404b-8d0e-e452e1dd52d0
   <tr>
     <td><strong>छवि</strong></td>
     <td>दृश्य अवलोकन और विवरण</td>
-    <td><em>आर्किटेक्चर आरेख की स्क्रीनशॉट</em></td>
+    <td><em>आर्किटेक्चर आरेख का स्क्रीनशॉट</em></td>
     <td>Pinecone</td>
   </tr>
 </table>
