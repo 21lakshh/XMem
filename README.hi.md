@@ -409,7 +409,7 @@ XMem अत्यधिक कॉन्फ़िगरेबल है। कि
   </tr>
   <tr><td><code>FALLBACK_ORDER</code></td><td><code>openrouter,gemini,claude,openai</code></td><td>प्रदाता फॉलबैक अनुक्रम</td></tr>
   <tr><td><code>DEEPSEEK_API_KEY</code></td><td>खाली</td><td>अधिकृत OpenAI-संगत एंडपॉइंट के लिए DeepSeek API कुंजी</td></tr>
-  <tr><td><code>MIMO_API_KEY</code></td><td>खाली</td><td>अधिकृत OpenAI-संगत एंडपॉइंट के लिए Xiaomi MiMo API कुंजी</td></tr>
+  <tr><td><code>MIMO_API_KEY</code></td><td>खाली</td><td>आधिकारिक OpenAI-संगत एंडपॉइंट के लिए Xiaomi MiMo API कुंजी</td></tr>
   <tr><td><code>CLASSIFIER_MODEL</code></td><td>डिफ़ॉल्ट मॉडल</td><td>classifier एजेंट के लिए मॉडल को ओवरराइड करें</td></tr>
   <tr><td><code>JUDGE_MODEL</code></td><td>डिफ़ॉल्ट मॉडल</td><td>judge एजेंट के लिए मॉडल को ओवरराइड करें</td></tr>
   <tr><td><code>RETRIEVAL_MODEL</code></td><td>डिफ़ॉल्ट मॉडल</td><td>रिट्रीवल संश्लेषण के लिए मॉडल को ओवरराइड करें</td></tr>
