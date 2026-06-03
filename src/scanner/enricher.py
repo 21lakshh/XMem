@@ -45,8 +45,12 @@ _ESCAPED_OPEN_TAG    = r"<\untrusted_code>"
 _ESCAPED_CLOSE_TAG   = r"<\/untrusted_code>"
 
 
-def _escape_untrusted(text: str) -> str:
+def _escape_untrusted(text: Any) -> str:
     """Neutralise both tag forms so untrusted content cannot break the isolation block."""
+    if text is None:
+        text = ""
+    else:
+        text = str(text)
     return (
         text
         .replace(_UNTRUSTED_CLOSE_TAG, _ESCAPED_CLOSE_TAG)
