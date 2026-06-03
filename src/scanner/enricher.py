@@ -39,13 +39,19 @@ from src.config import settings
 
 logger = logging.getLogger("xmem.scanner.enricher")
 
+_UNTRUSTED_OPEN_TAG  = "<untrusted_code>"
 _UNTRUSTED_CLOSE_TAG = "</untrusted_code>"
-_ESCAPED_CLOSE_TAG = r"<\/untrusted_code>"
+_ESCAPED_OPEN_TAG    = r"<\untrusted_code>"
+_ESCAPED_CLOSE_TAG   = r"<\/untrusted_code>"
 
 
 def _escape_untrusted(text: str) -> str:
-    """Prevent tag-escape attacks by neutralising any closing tag in untrusted text."""
-    return text.replace(_UNTRUSTED_CLOSE_TAG, _ESCAPED_CLOSE_TAG)
+    """Neutralise both tag forms so untrusted content cannot break the isolation block."""
+    return (
+        text
+        .replace(_UNTRUSTED_CLOSE_TAG, _ESCAPED_CLOSE_TAG)
+        .replace(_UNTRUSTED_OPEN_TAG,  _ESCAPED_OPEN_TAG)
+    )
 
 
 # Exact values Phase 1 (ast_parser.py) writes to MongoDB — nothing else is valid.
