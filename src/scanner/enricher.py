@@ -48,6 +48,21 @@ def _escape_untrusted(text: str) -> str:
     return text.replace(_UNTRUSTED_CLOSE_TAG, _ESCAPED_CLOSE_TAG)
 
 
+# Exact values Phase 1 (ast_parser.py) writes to MongoDB — nothing else is valid.
+_ALLOWED_SYMBOL_TYPES: frozenset[str] = frozenset({"function", "method", "class"})
+
+# Exact values Phase 1 (git_ops.py SUPPORTED_EXTENSIONS) writes to MongoDB.
+_ALLOWED_LANGUAGES: frozenset[str] = frozenset({
+    "python", "javascript", "typescript", "java", "go",
+    "ruby", "rust", "cpp", "c", "csharp", "kotlin", "scala", "swift", "php",
+})
+
+
+def _allowlist(value: str, allowed: frozenset[str], default: str) -> str:
+    """Return value if it is a known Phase-1 enum member, otherwise the default."""
+    return value if value in allowed else default
+
+
 SYMBOL_BATCH_SIZE = 50
 FILE_BATCH_SIZE = 20
 DEFAULT_DELAY_SECONDS = 0.5
@@ -326,10 +341,10 @@ class Enricher:
 
         prompt = _SYMBOL_PROMPT.format(
             qualified_name=_escape_untrusted(symbol_name),
-            symbol_type=doc.get("symbol_type", "function"),
+            symbol_type=_allowlist(doc.get("symbol_type", "function"), _ALLOWED_SYMBOL_TYPES, "function"),
             signature=_escape_untrusted(doc.get("signature", "")),
             docstring=_escape_untrusted((doc.get("docstring", "") or "")[:500]),
-            language=language,
+            language=_allowlist(language, _ALLOWED_LANGUAGES, "python"),
             raw_code=_escape_untrusted(raw_code),
         )
 
@@ -460,7 +475,7 @@ class Enricher:
 
         prompt = _FILE_PROMPT.format(
             file_path=_escape_untrusted(file_path),
-            language=language,
+            language=_allowlist(language, _ALLOWED_LANGUAGES, "python"),
             symbol_count=len(symbols),
             symbol_list=_escape_untrusted(symbol_list),
         )
